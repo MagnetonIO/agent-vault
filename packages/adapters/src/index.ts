@@ -62,6 +62,11 @@ export {
   scanHistory,
 } from "./migrate.js";
 export {
+  createOpenCodeAdapter,
+  OPENCODE_SCHEMA,
+  type OpenCodeDeps,
+} from "./opencode.js";
+export {
   codexHomeOf,
   type Finding,
   type FindingKind,
