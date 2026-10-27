@@ -124,14 +124,14 @@ Three paths, strongest first:
 | Path | How | Does the key touch the harness? | Status |
 |------|-----|---------------------------------|--------|
 | **A. Out-of-band (primary)** | `agent-vault grab <name>` reads the clipboard, stores the key, clears the clipboard, and prints `stored github/pat (ghp_, 40 chars)`. Inside a harness: `! agent-vault grab github/pat` (the command line holds no secret). Or MCP `vault_capture` → **URL-mode elicitation** → vaultd's one-time page `http://127.0.0.1:<port>/capture/<nonce>` | **No** | Buildable now |
-| **B. Prompt safety net** | `UserPromptSubmit` hook detects a key → stores it → **blocks** the prompt → tells the user the reference name | **Yes:** it reaches local disk but not the model | Claude Code ✅ · Codex ⚠️ **fail-open until the hook is trusted** (`/hooks` → `t`; an untrusted hook is silently skipped and the prompt goes to the model; re-check with `doctor` after every Codex upgrade) · OpenCode ⚠️ (no block; can redact or reject via `session.context`/`session.title`, but text stays in `opencode.db`). Measured in S3 |
+| **B. Prompt safety net** | `UserPromptSubmit` hook detects a key → stores it → **blocks** the prompt → tells the user the reference name | **Yes:** it reaches local disk but not the model | Claude Code ✅ · Codex ⚠️ **fail-open until the hook is trusted** (`/hooks` → `t`; an untrusted hook is silently skipped and the prompt goes to the model; re-check with `doctor` after every Codex upgrade) · OpenCode ❌ no prompt capture in the MVP: keys go in through `grab` or MCP `vault_capture` only. Measured in S3 |
 | **C. Files** | `agent-vault import .env` and `agent-vault migrate` move values into the vault and rewrite them to references | Already on disk → rewritten | Buildable now |
 
 **How Path B works (checked against harness docs 2026-10-26):**
-1. Block with `suppressOriginalPrompt: true`. **The key never reaches the model.** Codex exception: the hook must be **trusted** first. Install cannot forge the trust hash; the user runs `/hooks` and presses `t`. Until then the hook is skipped silently (fail-open) and the prompt is sent. `doctor` proves the hook fires with a probe canary and repeats the check after each Codex upgrade.
+1. Block with `suppressOriginalPrompt: true`. **The key never reaches the model.** Codex exception: the hook must be **trusted** first. Install cannot forge the trust hash; the user runs `/hooks` and presses `t`. Until then the hook is skipped silently (fail-open) and the prompt is sent. `doctor codex` checks that a trust entry is present for the hook and that the hook's slot in `hooks.json` has not moved (moving it un-trusts it), and runs the hook command outside Codex on a probe canary. It cannot prove the hook fires inside Codex: that is a manual check (a real Codex prompt with a fake key), after install and after each Codex upgrade.
 2. Store the key in the vault.
-3. Scrub what the harness left on disk (measured in S3, `docs/spikes/s3-harness-hooks.md`). Hooks can't rewrite prompts. Residue differs: Claude `-p` writes one `queue-operation` transcript line (**after** the hook returns, so scrub on `SessionEnd` (measured working in `-p`: transcript stays valid JSONL, `--resume` OK; long-lived TUI untested) and sweep at the next `SessionStart` as the fallback; `Stop` doesn't fire after a block); Claude's TUI and `codex exec` leave nothing; Codex's TUI leaves a `history.jsonl` line unless `history.persistence = "none"`; OpenCode keeps the message in `opencode.db`. The Codex transcript format "isn't a stable interface", so the scrubber must tolerate format changes, be binary-safe (sqlite files need a same-length rewrite) and re-validate JSONL afterwards.
-4. Tag the secret `exposed-locally` and suggest rotation.
+3. Scrub what the harness left on disk (measured in S3, `docs/spikes/s3-harness-hooks.md`). Hooks can't rewrite prompts. Residue differs: Claude `-p` writes one `queue-operation` transcript line (**after** the hook returns, so scrub on `SessionEnd` (measured working in `-p`: transcript stays valid JSONL, `--resume` OK; long-lived TUI untested) and sweep at the next `SessionStart` as the fallback; `Stop` doesn't fire after a block); Claude's TUI and `codex exec` leave nothing; Codex's TUI leaves a `history.jsonl` line unless `history.persistence = "none"`; OpenCode keeps the message in `opencode.db`. The Codex transcript format "isn't a stable interface", so the scrubber must tolerate format changes and re-validate JSONL afterwards. **The MVP scrubber rewrites text files only.** It does not touch SQLite stores (`opencode.db`, Codex `state_5.sqlite` / `thread_history_1.sqlite`); `doctor` says so. Phase 2: a same-length, binary-safe rewrite of those.
+4. Tag the secret `exposed-locally` (`list` shows it); rotating it is up to the user.
 5. **Route to 100% off-disk:** Path A today, plus an upstream prompt-rewrite hook in each harness (Open question 3).
 
 **Detector:** gitleaks-compatible rules (provider prefixes such as `sk-ant-`, `sk-proj-`, `ghp_`, `github_pat_`, `xoxb-`, `AKIA`, `apify_api_`, plus JWTs and PEM blocks) plus an entropy check. False negatives are expected. That is why Path A is primary and B is only a net.
@@ -140,7 +140,7 @@ Three paths, strongest first:
 
 **References in files:** `GITHUB_TOKEN=vault://github/pat` is safe to commit. `agent-vault run --env-file .env -- <cmd>` resolves it.
 
-**Backfill:** `agent-vault scan` finds keys already leaked into harness history and transcripts, offers to vault them, and lists which to rotate.
+**Backfill:** `agent-vault scan` finds keys already leaked into harness history and transcripts and prints the file and a fingerprint of each, never the value. It does not vault or rotate them: move them with `grab` / `migrate`, and rotate any that leaked.
 
 ---
 
@@ -150,14 +150,14 @@ Three paths, strongest first:
 
 | Concern | Claude Code | Codex | OpenCode | Any other |
 |---------|-------------|-------|----------|-----------|
-| Prompt capture (B) | `UserPromptSubmit`: block + `suppressOriginalPrompt: true` (**required**; otherwise `Original prompt:` is written to the transcript). Measured: `-p` leaves 1 transcript line, TUI leaves nothing | `UserPromptSubmit` in `hooks.json`: `{"decision":"block"}`. Hooks are on by default, but **must be trusted** (`/hooks` → `t`, stored as `[hooks.state.*] trusted_hash`); an untrusted hook is skipped and the prompt goes to the model | No prompt hook in 2.x. `session.context` + `session.title` (v2 plugin, `export default {id, setup}`) can redact or reject the outbound turn; stored text stays in `opencode.db` | — |
+| Prompt capture (B) | `UserPromptSubmit`: block + `suppressOriginalPrompt: true` (**required**; otherwise `Original prompt:` is written to the transcript). Measured: `-p` leaves 1 transcript line, TUI leaves nothing | `UserPromptSubmit` in `hooks.json`: `{"decision":"block"}`. Hooks are on by default, but **must be trusted** (`/hooks` → `t`, stored as `[hooks.state.*] trusted_hash`); an untrusted hook is skipped and the prompt goes to the model | No prompt hook in 2.x, so the MVP has no Path B for OpenCode: `grab` / MCP `vault_capture` only. (S3: `session.context` + `session.title` in a v2 plugin can redact or reject the outbound turn, but stored text stays in `opencode.db`; not built) | — |
 | Tool guard | `PreToolUse` (`updatedInput` can rewrite) | `PreToolUse` | `tool.execute.before` (docs name; in 2.1.4 the `tool.hook("execute.before")` name exists, not exercised) | — |
 | Harness's own model key | `apiKeyHelper` → `agent-vault helper anthropic`. **Measured: the helper output is not exported to Bash tool or hook env** (a key in `ANTHROPIC_API_KEY` is) | `model_providers.<id>.auth.command` | Phase 2 base-URL proxy; MVP `run -- opencode` (T1 only) | `run --` |
 | MCP server secrets | Wrap stdio servers: `command: agent-vault`, `args: [run, --bundle, x, --, <server>]` | Same; HTTP servers: `http_headers_helper` / `bearer_token_env_var` | Wrap local `command`; remote `headers` | Wrap |
 | Shell env hygiene | Never put raw keys in harness env (`ANTHROPIC_API_KEY` reaches Bash and hooks) | `shell_environment_policy` | `shell.env` is **not in 2.1.4**; v2 `shell.hook` name unverified. Inject via `run --` for now | — |
 | CLI to add an MCP server (S3, `--help` only) | `claude mcp add [-s user] [-t stdio\|sse\|http] [-e K=V] [-H "K: V"] <name> <cmdOrUrl> [args]` | `codex mcp add <name> (--url U [--bearer-token-env-var V] \| [--env K=V] -- <cmd>...)` | `opencode mcp add [--url U] [--header k=v] [--env k=v] [--global] <name> [-- <cmd>...]` | — |
 | Proxy mode (phase 2) | `HTTPS_PROXY` + `NODE_EXTRA_CA_CERTS` | same | same | same |
-| History scrub | transcript `projects/<proj>/<session>.jsonl` (`queue-operation.content`); `history.jsonl` is TUI-only and held nothing for a blocked prompt. Resume after scrub: OK | `history.persistence = "none"` removes the TUI residue entirely; otherwise `history.jsonl`, rollout, `state_5.sqlite`, `thread_history_1.sqlite` (+`-wal`). Resume after scrub: OK | `~/.local/share/opencode/opencode.db` (`session_message.data`) + `log/opencode.log` (argv). Resume after scrub: OK | — |
+| History scrub | transcript `projects/<proj>/<session>.jsonl` (`queue-operation.content`); `history.jsonl` is TUI-only and held nothing for a blocked prompt. Resume after scrub: OK | `history.persistence = "none"` removes the TUI residue entirely; otherwise `history.jsonl`, rollout, `state_5.sqlite`, `thread_history_1.sqlite` (+`-wal`; SQLite not scrubbed in the MVP). Resume after scrub: OK | `~/.local/share/opencode/opencode.db` (`session_message.data`; not scrubbed in the MVP) + `log/opencode.log` (argv). Resume after scrub: OK | — |
 
 ---
 
@@ -219,14 +219,14 @@ Path handling goes through one `paths` module: XDG on Linux, `%LOCALAPPDATA%` on
 |---------|-------|
 | `init` | Create DB, generate keys, store root key in OS store, **print recovery key once** |
 | `grab <name>` | Clipboard → vault → clear clipboard. Prints name + type + length only |
-| `set <name>` | Reads from TTY (`/dev/tty` / `CONIN$`) or opens the capture page. **Never argv/env**. Refuses without a TTY |
-| `list` / `rm` | Names + status, never values |
+| `set <name>` | Reads from the TTY (`/dev/tty` / `CONIN$`) only. **Never argv/env/stdin**. Refuses without a TTY and points at `grab` (the capture page is MCP `vault_capture`) |
+| `list` / `rm` | Name, type, length and tags (e.g. `exposed-locally`), never values. No rotation advice |
 | ~~`get`~~ → `reveal` | **Not in MVP.** Phase 2: human-presence gate, TTY-only output |
 | `import <.env>` / `migrate` | Move plaintext values → vault and rewrite them to `vault://` references (`.env`, `.mcp.json`, `~/.claude.json`, `~/.codex/config.toml`, `opencode.json`) |
-| `scan` | Find keys already leaked into harness history/transcripts |
-| `install` / `uninstall` / `doctor <harness>` | Harness adapters (see table above). `doctor codex` must prove the `UserPromptSubmit` hook is **trusted and fires** (probe canary blocked), not just present in `hooks.json`; rerun after Codex upgrades. Untrusted = silently skipped = fail-open |
+| `scan` | Find keys already leaked into harness history/transcripts. Prints file + fingerprint (`<rule> len=N sha256:XXXXXXXX`) only; exit 1 on a hit |
+| `install` / `uninstall` / `doctor <harness>` | Harness adapters (see table above). `doctor codex` checks that a trust entry is present for the `UserPromptSubmit` hook and that its slot has not moved, and probes the hook command outside Codex (canary blocked). Whether it fires **inside** Codex is a manual check (a real prompt with a fake key); redo it after Codex upgrades. Untrusted = silently skipped = fail-open |
 | `run [--bundle] [--env-file] -- <cmd>` | Process injection with output redaction |
-| `helper <service>` | Credential-helper output for harness model keys (`apiKeyHelper`, `auth.command`) |
+| `helper <secret>` | Prints a secret tagged `helper` for harness model keys (`apiKeyHelper`, `auth.command`) |
 | `service add` / `bundle create` / `grant` / `session create` | Admin ops; human-presence gate in Phase 2 |
 | `audit` | Query logs (no values) |
 | `sync` / `enroll` | Phase 3 / 4 |
@@ -237,9 +237,10 @@ Tools the agent sees (metadata only):
 
 | Tool | Returns |
 |------|---------|
-| `vault_list` | Names, bundle, permitted ops, configured/locked status |
-| `vault_capture` | Starts a URL-mode elicitation to the capture page; returns the stored **name** only |
-| `vault_status` | Locked/unlocked, session TTL, sync state |
+| `vault_list` | `SecretMeta` only: name, type, length, tags, dates. Never a value |
+| `vault_capture` | Starts a URL-mode elicitation to the capture page and waits about 45 s; returns the stored **name** only, or the link and an `elicitationId` to wait on |
+| `vault_capture_wait` | Waits about 45 s more on an `elicitationId` from `vault_capture`; returns the stored **name**, or "still waiting" |
+| `vault_status` | Daemon running, vault initialized/locked, key store kind, version |
 | `vault_run` | Runs an **allowlisted** command bound to a bundle; returns redacted stdout/stderr |
 | `vault_request` | (Phase 2) Vault makes an approved HTTP call on the agent's behalf |
 
@@ -344,7 +345,7 @@ Append-only, **hash-chained** log: each entry carries an HMAC of the previous en
 2. The `UserPromptSubmit` hook detects it, stores it as `github/pat`, and **blocks** the prompt. The key never reaches the model.
 3. The hook replies: "Stored as `github/pat`. Re-send using `vault://github/pat`."
 4. On `SessionEnd` (and again at the next `SessionStart`), the scrubber removes the key from the transcript and `~/.claude/history.jsonl`. Audit records `captured`.
-5. The secret is tagged `exposed-locally`. `agent-vault list` suggests rotation.
+5. The secret is tagged `exposed-locally`, and `agent-vault list` shows the tag. Rotating it is up to you.
 
 **Apify collector:**
 1. `agent-vault grab contract-search/apify` (copied from the Apify console, never typed into chat).
