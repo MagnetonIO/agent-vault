@@ -811,6 +811,31 @@ describe("doctor", () => {
     expect(c?.detail).toContain("thread_history_1.sqlite");
   });
 
+  test("trust says it checks presence only, in both outcomes", async () => {
+    const m = await installed();
+    const proof = "presence only; run a real Codex prompt with a fake key to prove it fires";
+    expect((await check(m, "trust"))?.detail).toContain(proof);
+    trustAll();
+    expect((await check(m, "trust"))?.detail).toContain(proof);
+  });
+
+  test("a CODEX_HOME outside the home directory, and an auth table for openai, each get an info line", async () => {
+    const m = await installed();
+    expect(await check(m, "scope")).toBeUndefined();
+    expect(await check(m, "provider")).toBeUndefined();
+
+    await putSecret("openai/helper", ["helper"]);
+    await m.adapter.install({ home: box.home, modelKey: "openai/helper" });
+    expect(await check(m, "provider")).toMatchObject({ ok: true, severity: "info" });
+
+    const elsewhere = path.join(box.dir, "elsewhere");
+    const out = make({ env: { CODEX_HOME: elsewhere } });
+    await out.adapter.install({ home: box.home });
+    const scope = (await out.adapter.doctor(box.home)).checks.find((c) => c.name === "scope");
+    expect(scope).toMatchObject({ ok: true, severity: "info" });
+    expect(scope?.detail).toContain("scrubs only files under it");
+  });
+
   test("hooks missing, or pointing at a binary that is gone, are red with the fix", async () => {
     const m = make();
     let report = await m.adapter.doctor(box.home);

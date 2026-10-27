@@ -741,6 +741,7 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
         const t = h ? trustOf(root, hooksPath, h) : undefined;
         return t && stale[t.key] !== t.hash ? t : undefined;
       };
+      const proof = "presence only; run a real Codex prompt with a fake key to prove it fires";
       const note =
         "editing the hook command un-trusts it, so re-check after install or after a Codex upgrade";
       if (!prompt) {
@@ -749,7 +750,7 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
         add(
           "trust",
           false,
-          `hook not trusted: Codex will skip it and send pasted keys to the model (${note})`,
+          `hook not trusted: Codex will skip it and send pasted keys to the model (${proof}; ${note})`,
           "run /hooks in Codex and press t",
         );
       } else if (scrub && !trustFor(scrub)) {
@@ -761,7 +762,7 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
           "warn",
         );
       } else {
-        add("trust", true, `trusted by Codex (${note})`);
+        add("trust", true, `trusted by Codex (${proof}; ${note})`);
       }
 
       // features: a Codex with hooks off ignores hooks.json altogether
@@ -848,6 +849,29 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
           "blocked prompts typed in the TUI land in history.jsonl until the next scrub",
           "agent-vault install codex --no-history (this turns off all Codex history)",
           "warn",
+        );
+      }
+
+      const rel = path.relative(path.resolve(home), codexHome(home));
+      if (rel.startsWith("..") || path.isAbsolute(rel)) {
+        add(
+          "scope",
+          true,
+          `CODEX_HOME (${codexHome(home)}) is outside your home directory: the daemon scrubs only files under it, so history and rollouts there are not scrubbed`,
+          undefined,
+          "info",
+        );
+      }
+      const modelAuth = isRecord(root.model_providers)
+        ? root.model_providers[DEFAULT_PROVIDER]
+        : undefined;
+      if (isRecord(modelAuth) && modelAuth.auth !== undefined) {
+        add(
+          "provider",
+          true,
+          `${DEFAULT_PROVIDER} is Codex's built-in provider: whether Codex honours a user auth table for it is untested`,
+          undefined,
+          "info",
         );
       }
 
