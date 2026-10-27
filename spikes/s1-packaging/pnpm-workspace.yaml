@@ -1,5 +1,5 @@
 # Own workspace root: keeps this throwaway spike (and its lockfile) out of the main
-# monorepo install. better-sqlite3 needs its install script (prebuild-install) to fetch the .node.
+# monorepo install. No dependency here runs an install script: better-sqlite3 13 ships its
+# prebuilds inside the tarball and @napi-rs/keyring ships .node files via optionalDependencies.
 allowBuilds:
-  better-sqlite3: true
   esbuild: false
