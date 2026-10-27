@@ -315,6 +315,19 @@ describe("agent-vault CLI", { timeout: TIMEOUT_MS }, () => {
     expect(await quiet.daemonPid()).toBeNull();
   });
 
+  test("daemon install refuses the keyfile store without a passphrase, before touching anything", async () => {
+    const quiet = sandbox();
+    fs.writeFileSync(path.join(quiet.home, "config.json"), '{"keystore":"keyfile"}');
+    const res = await quiet.cli(["daemon", "install"], {
+      env: { AGENT_VAULT_KEYFILE_PASSPHRASE: "" },
+    });
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain(
+      "the keyfile store needs a passphrase at daemon start; use --keystore os or set AGENT_VAULT_KEYFILE_PASSPHRASE in the service environment yourself",
+    );
+    expect(fs.readdirSync(quiet.dir).sort()).toEqual(["clipboard.txt", "vault"]);
+  });
+
   test("daemon stop stops the daemon and a second stop says it is not running", async () => {
     const pid = await sb.daemonPid();
     expect(pid).not.toBeNull();

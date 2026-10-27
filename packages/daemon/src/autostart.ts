@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
+import { isSea } from "node:sea";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ipcEndpoint, type VaultPaths } from "@agent-vault/platform";
 import { connect, type IpcClient } from "./client.js";
@@ -23,11 +25,31 @@ export type EnsureDaemonOptions = {
   timeoutMs?: number | undefined;
 };
 
-/** The CLI that is running now, asked to run the daemon (Task 14 provides `daemon run`). */
-function defaultArgv(): string[] {
-  const entry = process.argv[1];
+export type DaemonRunArgvOptions = {
+  sea?: boolean | undefined;
+  execPath?: string | undefined;
+  /** The script node was started with (`process.argv[1]`); unused in a SEA binary. */
+  entry?: string | undefined;
+};
+
+/**
+ * The CLI that is running now, asked to run the daemon (Task 14 provides `daemon run`): node plus
+ * the script, or, in a SEA binary, the binary alone (it has no script, and `process.argv[1]` is
+ * not one). Absolute and symlink-resolved, so it stays valid when the caller's cwd is gone.
+ */
+export function daemonRunArgv(opts: DaemonRunArgvOptions = {}): string[] {
+  const resolveReal = (file: string): string => {
+    try {
+      return fs.realpathSync(file);
+    } catch {
+      return path.resolve(file);
+    }
+  };
+  const execPath = opts.execPath ?? process.execPath;
+  if (opts.sea ?? isSea()) return [resolveReal(execPath), "daemon", "run"];
+  const entry = "entry" in opts ? opts.entry : process.argv[1];
   if (!entry) throw new Error("cannot tell which CLI to spawn: process.argv[1] is empty");
-  return [process.execPath, entry, "daemon", "run"];
+  return [execPath, resolveReal(entry), "daemon", "run"];
 }
 
 /**
@@ -45,7 +67,7 @@ export async function ensureDaemon(
     // Not running (or not answering): start one below.
   }
 
-  const [cmd, ...args] = opts.spawnArgv ?? defaultArgv();
+  const [cmd, ...args] = opts.spawnArgv ?? daemonRunArgv();
   if (!cmd) throw new Error("spawnArgv is empty");
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   const child = spawn(cmd, args, { detached: true, stdio: "ignore", windowsHide: true });
