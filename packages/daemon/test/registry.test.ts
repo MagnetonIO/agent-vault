@@ -9,8 +9,11 @@ import { b64, MODES, useDaemon } from "./helpers.js";
 
 const SECRET = "registry-test-secret-éü-7788";
 
-/** Methods that are not `mutates` but write their own audit events (and are covered in runner.test.ts). */
-const SELF_AUDITED = new Set(["run.start", "run.stdin", "run.signal"]);
+/**
+ * Methods that are not `mutates` but write their own audit events (`run.*` is covered in
+ * runner.test.ts, `daemon.stop` in lifecycle.test.ts; calling it here would stop the daemon).
+ */
+const SELF_AUDITED = new Set(["run.start", "run.stdin", "run.signal", "daemon.stop"]);
 
 /** Valid params for every other non-mutating method. A new method without an entry fails the test. */
 const READ_PARAMS: Record<string, unknown> = {

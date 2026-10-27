@@ -2,6 +2,7 @@ import { helperMethods } from "../helper.js";
 import { auditMethods } from "./audit.js";
 import { bundleMethods } from "./bundle.js";
 import { captureMethods } from "./capture.js";
+import { daemonMethods } from "./daemon.js";
 import { runMethods } from "./run.js";
 import { scrubMethods } from "./scrub.js";
 import { secretMethods } from "./secret.js";
@@ -15,6 +16,7 @@ import { vaultMethods } from "./vault.js";
  */
 export const registry: Registry = Object.freeze({
   ...vaultMethods,
+  ...daemonMethods,
   ...secretMethods,
   ...bundleMethods,
   ...auditMethods,

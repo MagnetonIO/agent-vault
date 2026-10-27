@@ -2,7 +2,8 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { openVault, VaultNotInitializedError } from "@agent-vault/core";
+import { setTimeout as sleep } from "node:timers/promises";
+import { openVault, RootKeyMissingError, VaultNotInitializedError } from "@agent-vault/core";
 import {
   ensurePrivateDir,
   type IpcEndpoint,
@@ -52,6 +53,8 @@ export type StartDaemonOptions = {
 export type DaemonHandle = {
   endpoint: IpcEndpoint;
   close(): Promise<void>;
+  /** Resolves once the daemon has closed, whether `close()` or a `daemon.stop` call did it. */
+  closed: Promise<void>;
 };
 
 /** True if something answers `status` on `endpoint` (after the handshake, for tcp). */
@@ -358,8 +361,8 @@ function serveConnection({ socket, token, dispatch, limits }: Conn): void {
 }
 
 /**
- * Start vaultd: open the vault (or run uninitialized until `vault.init`), claim the endpoint and
- * serve JSON-RPC. `close()` stops listening, ends connections, zeroes the vault's keys and removes
+ * Start vaultd: open the vault (or run without one until `vault.init` or `vault.recover`: there
+ * is none yet, or this device's root key is gone), claim the endpoint and serve JSON-RPC. `close()` stops listening, ends connections, zeroes the vault's keys and removes
  * the socket or endpoint files.
  */
 export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandle> {
@@ -379,7 +382,9 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
     try {
       state.vault = await openVault({ paths, store });
     } catch (err) {
-      if (!(err instanceof VaultNotInitializedError)) throw err;
+      if (!(err instanceof VaultNotInitializedError || err instanceof RootKeyMissingError)) {
+        throw err;
+      }
     }
     const dispatch = createDispatcher({
       registry: opts.methods ?? defaultRegistry,
@@ -388,6 +393,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
       store,
       capture,
       runner,
+      requestStop: () => void setImmediate(() => void stopGracefully()),
     });
     const limits = new Limits(token !== null);
     server = net.createServer((socket) => {
@@ -409,6 +415,10 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
   }
 
   let closing: Promise<void> | undefined;
+  let markClosed!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    markClosed = resolve;
+  });
   const close = (): Promise<void> => {
     closing ??= (async () => {
       state.closed = true;
@@ -422,8 +432,21 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
       token?.fill(0);
       removeEndpoint();
       releaseLock();
+      markClosed();
     })();
     return closing;
   };
-  return { endpoint, close };
+  /** A `daemon.stop`: let the connections finish writing their replies, then close. */
+  async function stopGracefully(): Promise<void> {
+    const ended = [...sockets].map(
+      (socket) =>
+        new Promise<void>((resolve) => {
+          socket.once("close", () => resolve());
+          socket.end();
+        }),
+    );
+    await Promise.race([Promise.all(ended), sleep(CLOSE_GRACE_MS)]);
+    await close();
+  }
+  return { endpoint, close, closed };
 }

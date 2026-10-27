@@ -1,7 +1,24 @@
-import { initVault, VaultExistsError } from "@agent-vault/core";
+import { initVault, recoverVault, VaultExistsError } from "@agent-vault/core";
+import { RpcError } from "../errors.js";
+import { ERR } from "../rpc.js";
 import { VERSION } from "../version.js";
 import { invalid, paramsObject, reqString } from "./params.js";
 import type { Registry } from "./types.js";
+
+/** The recovery key is 32 bytes, which BIP39 writes as 24 words. */
+const RECOVERY_WORDS = 24;
+
+function reqWords(p: Record<string, unknown>): string[] {
+  const words = p.words;
+  if (
+    !Array.isArray(words) ||
+    words.length !== RECOVERY_WORDS ||
+    words.some((w) => typeof w !== "string" || w.length === 0 || w.length > 32)
+  ) {
+    throw invalid("words", `must be an array of ${RECOVERY_WORDS} words`);
+  }
+  return words as string[];
+}
 
 export const vaultMethods: Registry = {
   status: {
@@ -37,6 +54,33 @@ export const vaultMethods: Registry = {
           ctx.state.vault = vault;
         }
         return { recoveryWords };
+      } finally {
+        ctx.state.initializing = false;
+      }
+    },
+  },
+  "vault.recover": {
+    mutates: true,
+    returnsSecret: false,
+    // Takes the recovery words (never returned, never logged), makes a fresh device root key in
+    // the daemon's store and opens the vault with it. Works on a locked daemon, where the root
+    // key is gone, and on an open one, which is reopened.
+    handler: async (ctx, params) => {
+      const words = reqWords(paramsObject(params, ["words", "harness"]));
+      if (ctx.state.initializing) {
+        throw new RpcError(ERR.APP, "another vault operation is in progress");
+      }
+      ctx.state.initializing = true;
+      try {
+        const vault = await recoverVault({ paths: ctx.paths, store: ctx.store, words });
+        if (ctx.state.closed) {
+          vault.close();
+        } else {
+          const previous = ctx.state.vault;
+          ctx.state.vault = vault;
+          previous?.close();
+        }
+        return { ok: true };
       } finally {
         ctx.state.initializing = false;
       }

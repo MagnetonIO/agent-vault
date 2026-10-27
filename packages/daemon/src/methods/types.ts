@@ -32,6 +32,8 @@ export type Ctx = {
   readonly audit: AuditFields;
   /** The open vault; throws VaultNotInitializedError before `vault.init`. */
   vault(): Vault;
+  /** Close the daemon once the reply to this call has been written. */
+  requestStop(): void;
   /** Send a JSON-RPC notification to the connection that made this call. */
   notify(method: string, params: unknown): void;
 };

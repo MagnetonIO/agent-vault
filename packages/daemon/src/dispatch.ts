@@ -65,7 +65,12 @@ const APP_ERRORS: readonly (abstract new (...args: never[]) => Error)[] = [
 ];
 
 /** Before `vault.init` only these work. */
-const WORKS_UNINITIALIZED: ReadonlySet<string> = new Set(["status", "vault.init"]);
+const WORKS_UNINITIALIZED: ReadonlySet<string> = new Set([
+  "status",
+  "vault.init",
+  "vault.recover",
+  "daemon.stop",
+]);
 
 /** The wire form of a thrown error. Never a stack, and only the messages of known error classes. */
 export function toErrorObject(err: unknown): JsonRpcErrorObject {
@@ -102,6 +107,7 @@ type Deps = {
   store: RootKeyStore;
   capture: CaptureService;
   runner: RunnerService;
+  requestStop: () => void;
 };
 
 export function createDispatcher({
@@ -111,6 +117,7 @@ export function createDispatcher({
   store,
   capture,
   runner,
+  requestStop,
 }: Deps): Dispatcher {
   function record(method: string, params: unknown, ctx: Ctx, outcome: AuditInput["outcome"]) {
     if (!state.vault) return;
@@ -147,6 +154,7 @@ export function createDispatcher({
         if (!state.vault) throw new VaultNotInitializedError();
         return state.vault;
       },
+      requestStop,
       notify,
     };
     if (!def.mutates) return def.handler(ctx, params);
