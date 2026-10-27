@@ -1,0 +1,8 @@
+# agent-vault is a secret detector: its tests and spikes must contain secret-shaped
+# fixtures (all generated at runtime, never real). Keep secret scanners off them.
+version: 2
+secret:
+  ignored-paths:
+    - "packages/*/test/**"
+    - "test/e2e/**"
+    - "spikes/**"
