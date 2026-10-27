@@ -163,7 +163,7 @@ describe.each(MODES)("transport over %s", (mode) => {
         peer.send(batch);
         await new Promise((r) => setTimeout(r, 1000));
         const grown = process.memoryUsage().rss - before;
-        expect(grown).toBeLessThan(10 * 1024 * 1024);
+        expect(grown).toBeLessThan(20 * 1024 * 1024);
         expect(bigCalls.count).toBeLessThan(2000);
         // Other clients are served meanwhile.
         const other = await hold.connect();

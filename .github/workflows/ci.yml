@@ -1,18 +1,31 @@
 name: ci
 
+# Actions minutes are limited (macOS bills 10x, Windows 2x). A push runs Linux only; the full
+# 3-OS matrix runs on demand (`gh workflow run ci.yml -f full=true`) and on pull requests.
 on:
   push:
-    branches: [main, "feat/**", "claude/**"]
+    branches: [main, "feat/**"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: run macOS and Windows too
+        type: boolean
+        default: true
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
     name: check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        os: ${{ (github.event_name == 'pull_request' || inputs.full) && fromJSON('["macos-latest","ubuntu-latest","windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
     env:
       # Opt in to the platform package's real OS-keyring round trip (a throwaway account, deleted
       # afterwards). It only runs on CI runners: macOS login Keychain, Windows Credential Manager,
