@@ -110,3 +110,23 @@ export function addHooks(text: string, specs: HookSpec[], marker: string): strin
   }
   return out;
 }
+
+/** Append `spec` as a group of its own to its event's list. Nothing else in the file moves. */
+export function appendHook(text: string, { event, command, timeout }: HookSpec): string {
+  return appendAt(text, ["hooks", event], { hooks: [{ type: "command", command, timeout }] });
+}
+
+/** Remove the one hook at `entry`'s place, and its group if that leaves it empty. */
+export function removeHookEntry(
+  text: string,
+  entry: Pick<HookEntry, "event" | "group" | "index">,
+): string {
+  const group = (parseJson(text).hooks as Record<string, unknown[]>)[entry.event]?.[entry.group];
+  const alone = (group as { hooks: unknown[] }).hooks.length === 1;
+  return removeAt(
+    text,
+    alone
+      ? ["hooks", entry.event, entry.group]
+      : ["hooks", entry.event, entry.group, "hooks", entry.index],
+  );
+}

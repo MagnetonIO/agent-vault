@@ -19,6 +19,13 @@ export {
   tagFirst,
 } from "./claude-code.js";
 export {
+  CODEX_HOOK_MARKER,
+  type CodexDeps,
+  type CodexRunner,
+  createCodexAdapter,
+  TRUST_ACTION,
+} from "./codex.js";
+export {
   CHAINED_HOOK,
   checkDiff,
   type GuardHit,
@@ -43,11 +50,13 @@ export {
 } from "./hook.js";
 export {
   addHooks,
+  appendHook,
   findHooks,
   type HookEntry,
   type HookSpec,
   quoteArg,
   quoteCommand,
+  removeHookEntry,
   removeHooks,
   splitCommand,
 } from "./hook-config.js";
@@ -72,4 +81,15 @@ export {
   isRemoteHeader,
   type Sources,
 } from "./sources.js";
+export {
+  appendTable,
+  eolOf,
+  insertUnderHeader,
+  parseToml,
+  type TomlEdit,
+  TomlEditError,
+  tomlArray,
+  tomlString,
+  undoEdit,
+} from "./toml-edit.js";
 export { parseWrapper, type Wrapped, wrapArgv } from "./wrap.js";
