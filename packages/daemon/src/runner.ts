@@ -257,6 +257,8 @@ type Active = {
   killTimer: NodeJS.Timeout | undefined;
   /** Stops watching the owner's connection. */
   unwatch: () => void;
+  /** A `run.stdin` is waiting for the child to take its data. */
+  stdinBusy: boolean;
 };
 
 export type RunnerService = {
@@ -276,7 +278,8 @@ export type RunnerService = {
    * Write to or end the child's stdin. Only the connection that started the run may. Resolves once
    * the child's stdin has taken the data (drained), the stream has finished or closed, or the
    * child is gone, so a client that awaits each call never gets ahead of a child that is not
-   * reading.
+   * reading. While one call is waiting, any other is refused with RunError("stdin busy"): a client
+   * that does not wait cannot make the daemon queue data.
    */
   stdin(owner: Connection, runId: string, data: Buffer | undefined, end: boolean): Promise<void>;
   /** Send a signal to the child. Only the connection that started the run may. */
@@ -412,6 +415,7 @@ export function createRunnerService(): RunnerService {
         exited: exited.then(() => {}),
         killTimer: undefined,
         unwatch: () => {},
+        stdinBusy: false,
       };
       active.set(runId, entry);
       // From here the owner's connection decides how long the child lives.
@@ -467,17 +471,21 @@ export function createRunnerService(): RunnerService {
     },
 
     stdin(owner, runId, data, end) {
-      const { child } = owned(owner, runId);
+      const entry = owned(owner, runId);
+      const { child } = entry;
       const { stdin } = child;
+      if (entry.stdinBusy) throw new RunError("stdin busy");
       if (!stdin || stdin.destroyed || !stdin.writable) return Promise.resolve();
       const accepted = data && data.length > 0 ? stdin.write(data) : true;
       if (end) stdin.end();
       if (accepted) return Promise.resolve();
+      entry.stdinBusy = true;
       return new Promise<void>((resolve) => {
         const events = ["drain", "finish", "close", "error"] as const;
         const done = () => {
           for (const event of events) stdin.off(event, done);
           child.off("exit", done);
+          entry.stdinBusy = false;
           resolve();
         };
         for (const event of events) stdin.once(event, done);

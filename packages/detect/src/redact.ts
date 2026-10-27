@@ -1,6 +1,8 @@
 export type Redactor = {
   push(chunk: string): string;
   flush(): string;
+  /** How many chars are held back right now; at most about twice the longest variant. */
+  heldLength(): number;
 };
 
 type Span = { start: number; end: number; name: string };
@@ -55,7 +57,9 @@ const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
  *
  * Matches that overlap or touch are merged into one redaction named after the leftmost match,
  * so no tail of an overlapping secret survives. A merged run that reaches the hold-back window
- * is held whole until the next push, since more data could still extend it.
+ * is held until the next push, since more data could still extend it; once such a run is longer
+ * than the longest variant its finished part is redacted at once (as one redaction per push), so
+ * the work and the memory stay linear however long the run is.
  *
  * Throws `RangeError` (naming the secret, never its value) for values under 4 chars.
  */
@@ -75,6 +79,8 @@ export function createRedactor(secrets: { name: string; value: string }[]): Reda
   const firstChars = new Set(texts.map((t) => t[0]));
   const longest = Math.max(1, ...texts.map((t) => t.length));
   let held = "";
+  /** How many chars at the start of `held` were already redacted (see `drain`). */
+  let covered = 0;
 
   /** Length of the longest suffix of `buf` that is a proper prefix of some variant. */
   function heldSuffixLength(buf: string): number {
@@ -86,15 +92,22 @@ export function createRedactor(secrets: { name: string; value: string }[]): Reda
     return 0;
   }
 
-  /** Every complete match in `buf`, with overlapping or adjacent ones merged. */
-  function mergedMatches(buf: string): Span[] {
+  /**
+   * Every complete match in `buf`, sorted by start. Matches that end inside the first `covered`
+   * chars are skipped: a redaction was already sent for those chars.
+   */
+  function matchesIn(buf: string, covered: number): Span[] {
     const found: Span[] = [];
     for (const [text, name] of variants) {
       for (let i = buf.indexOf(text); i !== -1; i = buf.indexOf(text, i + 1)) {
-        found.push({ start: i, end: i + text.length, name });
+        if (i + text.length > covered) found.push({ start: i, end: i + text.length, name });
       }
     }
-    found.sort((a, b) => a.start - b.start || b.end - a.end);
+    return found.sort((a, b) => a.start - b.start || b.end - a.end);
+  }
+
+  /** Overlapping or adjacent matches merged into spans, each named after its leftmost match. */
+  function mergeSpans(found: Span[]): Span[] {
     const merged: Span[] = [];
     for (const m of found) {
       const last = merged[merged.length - 1];
@@ -104,21 +117,48 @@ export function createRedactor(secrets: { name: string; value: string }[]): Reda
     return merged;
   }
 
-  function drain(buf: string, limit: number, final: boolean): { out: string; rest: string } {
+  /**
+   * Redact `buf`, whose first `covered` chars already have their redaction sent. Returns what can
+   * be sent now, what stays held and how many chars at the start of that are covered.
+   */
+  function drain(
+    buf: string,
+    covered: number,
+    limit: number,
+    final: boolean,
+  ): { out: string; rest: string; covered: number } {
+    const found = matchesIn(buf, covered);
     let out = "";
-    let cursor = 0;
+    let cursor = covered;
+    let coverEnd = covered;
     let emitUpTo = final ? buf.length : limit;
-    for (const m of mergedMatches(buf)) {
+    for (const m of mergeSpans(found)) {
       // A span that reaches `limit` could still grow (or merge with a match that is only
       // partly buffered), so it and everything after it waits for more data.
       if (!final && m.end >= limit) {
-        emitUpTo = Math.min(m.start, limit);
+        if (limit - m.start > longest) {
+          // A run this long (a secret printed over and over) must not be held whole and rescanned
+          // on every push. Everything before `limit` is covered by whole matches, so redact it
+          // now. A match that begins before `limit` and ends after it is redacted too: its end
+          // is remembered as `covered` so it is dropped, never printed, when the tail is sent.
+          out += `${buf.slice(cursor, m.start)}[redacted vault://${m.name}]`;
+          cursor = limit;
+          for (const f of found) {
+            if (f.start >= m.start && f.start < limit) coverEnd = Math.max(coverEnd, f.end);
+          }
+        } else {
+          emitUpTo = Math.min(m.start, limit);
+        }
         break;
       }
       out += `${buf.slice(cursor, m.start)}[redacted vault://${m.name}]`;
       cursor = m.end;
     }
-    return { out: out + buf.slice(cursor, emitUpTo), rest: buf.slice(emitUpTo) };
+    return {
+      out: out + buf.slice(cursor, emitUpTo),
+      rest: buf.slice(emitUpTo),
+      covered: Math.max(0, coverEnd - emitUpTo),
+    };
   }
 
   return {
@@ -127,14 +167,17 @@ export function createRedactor(secrets: { name: string; value: string }[]): Reda
       let limit = buf.length - heldSuffixLength(buf);
       // Never emit half of a surrogate pair.
       if (limit > 0 && limit < buf.length && isHighSurrogate(buf.charCodeAt(limit - 1))) limit--;
-      const { out, rest } = drain(buf, limit, false);
-      held = rest;
-      return out;
+      const result = drain(buf, covered, limit, false);
+      held = result.rest;
+      covered = result.covered;
+      return result.out;
     },
     flush() {
-      const { out } = drain(held, held.length, true);
+      const { out } = drain(held, covered, held.length, true);
       held = "";
+      covered = 0;
       return out;
     },
+    heldLength: () => held.length,
   };
 }

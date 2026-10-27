@@ -238,6 +238,44 @@ for (const [n, sep] of [[64, "\\n"], [76, "\\n"], [76, "\\r\\n"]]) console.log(b
       await run.result;
     });
 
+    test("a secret printed back to back for 20 MiB does not stall the daemon", async () => {
+      await put("t", SECRET);
+      const writes = 320;
+      const run = startRun(env.client, {
+        argv: nodeE(
+          `const chunk = process.env.TOKEN.repeat(3640); // 65520 bytes
+let i = 0;
+(function go() {
+  while (i < ${writes}) {
+    i++;
+    if (!process.stdout.write(chunk)) return void process.stdout.once("drain", go);
+  }
+})();`,
+        ),
+        env: { TOKEN: "vault://t" },
+      });
+      let notifications = 0;
+      env.client.onNotification((method, p) => {
+        if (method === "run.output" && (p as { runId: string }).runId === run.runId)
+          notifications++;
+      });
+      let worstLag = 0;
+      let last = performance.now();
+      const probe = setInterval(() => {
+        const now = performance.now();
+        worstLag = Math.max(worstLag, now - last - 20);
+        last = now;
+      }, 20);
+      try {
+        expect(await run.result).toEqual({ exitCode: 0 });
+      } finally {
+        clearInterval(probe);
+      }
+      expect(run.out.stdout).toMatch(/^(\[redacted vault:\/\/t\])+$/);
+      expect(notifications).toBeGreaterThan(100); // steady output, not one block at the end
+      expect(worstLag).toBeLessThan(500);
+    });
+
     test("a secret under 4 characters is an app error and the child never runs", async () => {
       await put("tiny", "abc");
       const marker = path.join(env.dir, "ran");
@@ -658,6 +696,69 @@ let i = 0;
           () => {},
           () => {}, // "no such run" once it is gone
         );
+      },
+      60_000,
+    );
+
+    test.runIf(mode === MODES[0])(
+      "pipelined run.stdin calls are refused while one is waiting, and nothing queues",
+      async () => {
+        const MiB = 1024 * 1024;
+        const warnings = vi.spyOn(process, "emitWarning");
+        try {
+          const run = startRun(env.client, {
+            argv: nodeE("console.log('up'); setInterval(() => {}, 1000)"),
+          });
+          await run.seen("stdout", "up");
+          const big = b64("x".repeat(512 * 1024)); // more than the pipe holds: this one waits
+          const small = b64("x".repeat(16 * 1024));
+          const baseline = process.memoryUsage().rss;
+          const calls = Array.from({ length: 100 }, (_, i) =>
+            env.client
+              .call(
+                "run.stdin",
+                { runId: run.runId, dataB64: i === 0 ? big : small },
+                { timeoutMs: 0 },
+              )
+              .then(
+                () => "ok",
+                (err: unknown) => err,
+              ),
+          );
+          let refused: unknown[] = [];
+          for (let i = 0; i < 50 && refused.length < 99; i++) {
+            await new Promise((r) => setTimeout(r, 100));
+            const settled = await Promise.race([
+              Promise.all(calls.slice(1)),
+              new Promise<null>((r) => setTimeout(() => r(null), 0)),
+            ]);
+            if (settled) refused = settled;
+          }
+          expect(refused).toHaveLength(99);
+          for (const err of refused) {
+            expect(err).toBeInstanceOf(RpcError);
+            expect((err as RpcError).data).toEqual({ name: "RunError" });
+            expect((err as RpcError).message).toContain("stdin busy");
+          }
+          expect(process.memoryUsage().rss - baseline).toBeLessThan(20 * MiB);
+
+          // The first call is still waiting for a child that does not read; the run answers anyway.
+          const t0 = Date.now();
+          await env.client.call("run.signal", { runId: run.runId, signal: "SIGTERM" });
+          expect(Date.now() - t0).toBeLessThan(2000);
+          const result = await run.result;
+          if (POSIX) expect(result).toEqual({ exitCode: 143, signal: "SIGTERM" });
+          else expect(result.exitCode).not.toBe(0);
+          expect(await calls[0]).toBe("ok"); // released when the child went away
+
+          expect(
+            warnings.mock.calls.filter(
+              ([w]) => (w as Error).name === "MaxListenersExceededWarning",
+            ),
+          ).toEqual([]);
+        } finally {
+          warnings.mockRestore();
+        }
       },
       60_000,
     );

@@ -167,6 +167,65 @@ describe("redactor", () => {
     });
   });
 
+  describe("a secret printed over and over", () => {
+    const CHUNK = 16 * 1024;
+    const MARKERS_ONLY = /^(\[redacted vault:\/\/k\])+$/;
+
+    /** Push `text` in chunks; returns the output, the most ever held and the time taken. */
+    const pushAll = (value: string, text: string) => {
+      const r = createRedactor([{ name: "k", value }]);
+      let out = "";
+      let maxHeld = 0;
+      const t0 = performance.now();
+      for (let i = 0; i < text.length; i += CHUNK) {
+        out += r.push(text.slice(i, i + CHUNK));
+        maxHeld = Math.max(maxHeld, r.heldLength());
+      }
+      out += r.flush();
+      return { out, maxHeld, ms: performance.now() - t0 };
+    };
+
+    test("1e5 back-to-back copies are linear in time and bounded in memory", () => {
+      const value = "k3y-0123456789-abcdefghijklmnopqrstuvwxy"; // 40 chars
+      expect(value).toHaveLength(40);
+      const longest = Buffer.from(value).toString("base64").length;
+      const { out, maxHeld, ms } = pushAll(value, value.repeat(100_000));
+      expect(out).toMatch(MARKERS_ONLY);
+      expect(maxHeld).toBeLessThanOrEqual(2 * longest);
+      expect(ms).toBeLessThan(2000);
+    });
+
+    test("a secret that overlaps itself (period 2) is still only markers", () => {
+      const { out, maxHeld, ms } = pushAll("abababab", "ab".repeat(200_000));
+      expect(out).toMatch(MARKERS_ONLY);
+      expect(maxHeld).toBeLessThanOrEqual(2 * 12);
+      expect(ms).toBeLessThan(2000);
+    });
+
+    test("any chunking gives the same redaction as one push, up to marker count", () => {
+      let seed = 12345;
+      const rand = (n: number) => {
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return (seed >>> 8) % n;
+      };
+      const value = "abcabcab";
+      const collapse = (text: string) => text.replace(/(\[redacted vault:\/\/k\])+/g, "M");
+      for (let round = 0; round < 200; round++) {
+        // Mostly the secret's own letters, so there are long overlapping runs and near misses.
+        const text = Array.from({ length: 200 }, () => "abc!"[rand(round % 2 ? 4 : 3)]).join("");
+        const whole = run([{ name: "k", value }], [text]);
+        const pieces: string[] = [];
+        for (let i = 0; i < text.length; ) {
+          const n = 1 + rand(40);
+          pieces.push(text.slice(i, i + n));
+          i += n;
+        }
+        const chunked = run([{ name: "k", value }], pieces);
+        expect(collapse(chunked), `round ${round}`).toBe(collapse(whole));
+      }
+    });
+  });
+
   describe("multiple secrets", () => {
     test("each replaced with its own name", () => {
       const a = fakes.anthropic();
