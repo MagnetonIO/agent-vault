@@ -10,14 +10,18 @@ export const LOCKED_MESSAGE = `keyfile store is locked: set ${PASSPHRASE_ENV} or
 /**
  * A connection to vaultd, starting the daemon first if none runs. A keyfile daemon needs its
  * passphrase to start: from the environment it is inherited by the spawned daemon, otherwise it is
- * asked for here (twice while the keyfile does not exist yet) and handed on the same way.
+ * asked for here (twice while the keyfile does not exist yet) and handed on the same way. With
+ * `interactive: false` (stdin is someone else's protocol) it is never asked for.
  */
-export async function daemonClient(paths: VaultPaths = getPaths()): Promise<IpcClient> {
+export async function daemonClient(
+  paths: VaultPaths = getPaths(),
+  opts: { interactive?: boolean } = {},
+): Promise<IpcClient> {
   const running = await connect(ipcEndpoint(paths)).catch(() => null);
   if (running) return running;
   const keystore: KeystoreChoice = readConfig(paths);
   if (keystore === "keyfile" && !process.env[PASSPHRASE_ENV]) {
-    if (!isTty()) throw new CliError(LOCKED_MESSAGE, 2);
+    if (opts.interactive === false || !isTty()) throw new CliError(LOCKED_MESSAGE, 2);
     process.env[PASSPHRASE_ENV] = await promptPassphrase(!fs.existsSync(keyfilePath(paths)));
   }
   return ensureDaemon(paths);
