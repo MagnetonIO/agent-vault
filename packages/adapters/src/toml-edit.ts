@@ -58,8 +58,17 @@ function headerPath(name: string): string[] | null {
   }
 }
 
-/** A `[table]` line (not `[[array]]`), optionally followed by a comment. `\r` is left out of the match. */
+/**
+ * A `[table]` line (not `[[array]]`), optionally followed by a comment. `\r` is left out of the
+ * match. Lines are matched one by one, so a header-looking line inside a multi-line string is
+ * taken for a header: a table named by such a line is edited in the wrong place or not found. The
+ * parse-and-compare check in `codex.ts` (`checked`) refuses such an edit before any file changes,
+ * so the cost is a false refusal, never a wrong edit.
+ */
 const HEADER_RE = /^[ \t]*\[(?!\[)([^[\]\r\n]+)\][ \t]*(?:#[^\r\n]*)?(?=\r?$)/gm;
+
+/** Any table header, `[[array]]` ones included: the end of a table's own section. */
+const ANY_HEADER_RE = /^[ \t]*\[\[?[^[\]\r\n]+\]\]?[ \t]*(?:#[^\r\n]*)?\r?$/gm;
 
 /** Where the header line of `table` ends (before its line break), or -1 if there is none. */
 function headerEnd(text: string, table: string[]): number {
@@ -102,10 +111,12 @@ export function undoEdit(text: string, edit: TomlEdit): string | null {
     const at = text.lastIndexOf(edit.text);
     return at < 0 ? null : text.slice(0, at) + text.slice(at + edit.text.length);
   }
+  // Only inside the section of the table it was added to: a line like it in another table is the
+  // user's.
   const header = headerEnd(text, edit.table);
-  if (header >= 0 && text.startsWith(edit.text, header)) {
-    return text.slice(0, header) + text.slice(header + edit.text.length);
-  }
-  const at = text.indexOf(edit.text);
+  if (header < 0) return null;
+  ANY_HEADER_RE.lastIndex = header;
+  const sectionEnd = ANY_HEADER_RE.exec(text)?.index ?? text.length;
+  const at = text.slice(0, sectionEnd).indexOf(edit.text, header);
   return at < 0 ? null : text.slice(0, at) + text.slice(at + edit.text.length);
 }

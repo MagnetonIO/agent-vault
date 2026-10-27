@@ -98,6 +98,8 @@ type ConfigRecord = {
   edits: TomlEdit[];
   /** Trust keys whose hook changed under them, with the `trusted_hash` that went stale. */
   staleTrust: Record<string, string>;
+  /** Where our hooks sat when last installed (`user_prompt_submit` to `0:0`). */
+  slots: Record<string, string>;
 };
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -126,7 +128,8 @@ const recordIsEmpty = (r: ConfigRecord): boolean =>
   !r.createdFile &&
   r.mcp === null &&
   r.edits.length === 0 &&
-  Object.keys(r.staleTrust).length === 0;
+  Object.keys(r.staleTrust).length === 0 &&
+  Object.keys(r.slots).length === 0;
 
 /** `value` with every table a plain object (the TOML parser makes them without a prototype). */
 function plain(value: unknown): unknown {
@@ -226,6 +229,7 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
       mcp: f?.toml?.mcp ?? null,
       edits: f?.toml?.edits ?? [],
       staleTrust: f?.toml?.staleTrust ?? {},
+      slots: f?.toml?.slots ?? {},
     };
   };
   const storeRecord = (state: InstallState, configPath: string, rec: ConfigRecord): void => {
@@ -235,7 +239,7 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
         createdFile: rec.createdFile,
         created: [],
         prefix: prefix(),
-        toml: { mcp: rec.mcp, edits: rec.edits, staleTrust: rec.staleTrust },
+        toml: { mcp: rec.mcp, edits: rec.edits, staleTrust: rec.staleTrust, slots: rec.slots },
       };
     }
   };
@@ -377,7 +381,24 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
       const providerEntry = isRecord(configRoot.model_providers)
         ? configRoot.model_providers[providerId]
         : undefined;
-      if (modelKey !== undefined && isRecord(providerEntry) && providerEntry.auth !== undefined) {
+      const wantAuth =
+        modelKey === undefined
+          ? undefined
+          : {
+              command: deps.command[0] as string,
+              args: [...deps.command.slice(1), "helper", modelKey],
+            };
+      // The same auth as an earlier install of ours wrote (or the user wrote) is not a conflict.
+      const authIsOurs =
+        isRecord(providerEntry) &&
+        wantAuth !== undefined &&
+        isDeepStrictEqual(plain(providerEntry.auth), wantAuth);
+      if (
+        modelKey !== undefined &&
+        isRecord(providerEntry) &&
+        providerEntry.auth !== undefined &&
+        !authIsOurs
+      ) {
         throw new AdapterError(
           `${configPath} already sets auth for model provider "${providerId}"; remove it first, then retry`,
         );
@@ -404,11 +425,10 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
           'history: [history] persistence = "none" set. This disables ALL Codex history, not only blocked prompts',
         );
       }
-      if (modelKey !== undefined) {
-        const auth = {
-          command: deps.command[0] as string,
-          args: [...deps.command.slice(1), "helper", modelKey],
-        };
+      if (modelKey !== undefined && authIsOurs) {
+        modelNotes.push(`model key: ${providerId} already gets its key from ${modelKey}`);
+      } else if (modelKey !== undefined) {
+        const auth = wantAuth as { command: string; args: string[] };
         const made = appendTable(cfg, [
           `[model_providers.${providerId}.auth]`,
           `command = ${tomlString(auth.command)}`,
@@ -491,6 +511,17 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
         backedUp.add(file);
         report.backups.push(backupFile(file, backupsDir()));
       };
+
+      // Codex keys trust by position. If our hook sits elsewhere than when last installed, a trust
+      // entry at its new place belongs to whatever hook was there: it must not count for ours.
+      for (const h of findHooks(nextHooks, isOurs)) {
+        const slot = `${h.group}:${h.index}`;
+        const before = rec.slots[snake(h.event)];
+        const there =
+          before !== undefined && before !== slot ? trustOf(configRoot, hooksPath, h) : undefined;
+        if (there) rec.staleTrust[there.key] = there.hash;
+        rec.slots[snake(h.event)] = slot;
+      }
 
       if (hooksChanged) {
         // Trust entries Codex wrote for hooks that are no longer what they were stay in config.toml.
@@ -622,11 +653,23 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
       const hooksText = read(hooksPath);
       if (hooksText !== null) {
         parsedJson(hooksPath, hooksText);
-        const next = removeHooks(
-          hooksText,
-          isOurHook(prefixesOf(recordedHooks)),
-          pruneFrom(recordedHooks),
-        );
+        const ours = isOurHook(prefixesOf(recordedHooks));
+        const next = removeHooks(hooksText, ours, pruneFrom(recordedHooks));
+        // Removing our group moves every later group of that event up by one.
+        const placeOf = (text: string): Map<string, string> =>
+          new Map(
+            findHooks(text, (c) => !ours(c)).map((h) => [
+              `${h.event}\0${h.command}`,
+              `${h.group}:${h.index}`,
+            ]),
+          );
+        const placed = placeOf(next);
+        const moved = [...placeOf(hooksText)].some(([k, v]) => placed.get(k) !== v);
+        if (moved) {
+          log(
+            "your hooks after agent-vault's moved position; Codex may now treat them as untrusted; re-run /hooks",
+          );
+        }
         if (next !== hooksText) {
           backupFile(hooksPath, backupsDir());
           const bare = Object.keys(parseJson(next)).length === 0;
@@ -646,7 +689,13 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
         const text = read(configPath);
         if (text !== null) {
           let next = text;
-          for (const edit of [...rec.edits].reverse()) next = undoEdit(next, edit) ?? next;
+          for (const edit of [...rec.edits].reverse()) {
+            const undone = undoEdit(next, edit);
+            if (undone === null) {
+              const line = edit.text.trim().split(/\r?\n/)[0];
+              log(`left ${line} in ${configPath} (it moved or was changed); remove it by hand`);
+            } else next = undone;
+          }
           if (rec.createdFile && next.trim() === "") {
             if (text !== "") backupFile(configPath, backupsDir());
             fs.rmSync(configPath);
@@ -744,8 +793,17 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
       const proof = "presence only; run a real Codex prompt with a fake key to prove it fires";
       const note =
         "editing the hook command un-trusts it, so re-check after install or after a Codex upgrade";
+      const was = loaded.files[configPath]?.toml?.slots?.user_prompt_submit;
+      const now = prompt ? `${prompt.group}:${prompt.index}` : undefined;
       if (!prompt) {
         add("trust", false, "no prompt-submit hook to trust", reinstall);
+      } else if (was !== undefined && was !== now) {
+        add(
+          "trust",
+          false,
+          `our hook moved from ${was} to ${now}; Codex keys trust by position; re-run /hooks and trust it`,
+          "agent-vault install codex, then run /hooks in Codex and press t",
+        );
       } else if (!trustFor(prompt)) {
         add(
           "trust",
@@ -799,12 +857,13 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
       // MCP
       const mcp = mcpOf(root);
       if (!mcp) add("mcp", false, "agent-vault is not registered", reinstall);
-      else if (
-        typeof mcp.command === "string" &&
-        path.isAbsolute(mcp.command) &&
-        !fs.existsSync(mcp.command)
-      ) {
-        add("mcp", false, `the MCP server runs ${mcp.command}, which does not exist`, reinstall);
+      else if (!sameMcp(mcp)) {
+        add(
+          "mcp",
+          false,
+          `[mcp_servers.agent-vault] in ${configPath} runs a different command than this agent-vault (${String(mcp.command)})`,
+          "codex mcp remove agent-vault, then agent-vault install codex",
+        );
       } else add("mcp", true, `agent-vault registered in ${configPath}`);
 
       // probe: run the installed command line on a prompt that holds a made-up key

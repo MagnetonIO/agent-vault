@@ -88,6 +88,24 @@ describe("insertUnderHeader", () => {
     expect(insertUnderHeader(original, ["b"], "n = 3")).toBeNull();
   });
 
+  test("undo only looks inside the table it was added to: the same line in another table is the user's", () => {
+    const original = '[profiles.x.history]\npersistence = "none"\n\n[history]\nmax_bytes = 5\n';
+    const r = insertUnderHeader(original, ["history"], 'persistence = "none"');
+    const { text, edit } = r as NonNullable<typeof r>;
+    // The user adds a comment under the header, so the line is no longer right below it.
+    const edited = text.replace("[history]\n", "[history]\n# mine\n");
+    const undone = undoEdit(edited, edit);
+    expect(undone).toBe(
+      '[profiles.x.history]\npersistence = "none"\n\n[history]\n# mine\nmax_bytes = 5\n',
+    );
+    // If the line is gone from its table, nothing is touched.
+    const gone = original
+      .replace("max_bytes = 5", "max_bytes = 5\n[next]\n")
+      .replace("[history]\n", "[history]\n");
+    const moved = `${gone}persistence = "none"\n`;
+    expect(undoEdit(moved, { op: "insert", table: ["history"], text: edit.text })).toBeNull();
+  });
+
   test("no such header is null; a header-looking line inside a comment is not one", () => {
     expect(insertUnderHeader("a = 1\n", ["history"], "x = 2")).toBeNull();
     expect(insertUnderHeader("# [history]\na = 1\n", ["history"], "x = 2")).toBeNull();

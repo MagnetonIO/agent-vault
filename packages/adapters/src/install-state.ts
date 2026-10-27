@@ -26,6 +26,8 @@ export type FileState = {
         edits: TomlEdit[];
         /** Trust keys whose hook changed under them, with the `trusted_hash` that went stale. */
         staleTrust: Record<string, string>;
+        /** Where our hooks sat when last installed, `<event_snake>` to `<group>:<index>`: Codex keys trust by position. */
+        slots?: Record<string, string> | undefined;
       }
     | undefined;
 };

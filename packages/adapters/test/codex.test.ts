@@ -538,6 +538,27 @@ describe("--model-key", () => {
     expect(read(configFile())).toBe(USER_CONFIG);
   });
 
+  test("installing again with the same key and provider is idempotent, not a refusal", async () => {
+    await putSecret("local/helper", ["helper"]);
+    write(configFile(), USER_CONFIG);
+    const m = make();
+    const opts = { home: box.home, modelKey: "local/helper", provider: "custom" };
+    await m.adapter.install(opts);
+    const once = read(configFile());
+    const again = await m.adapter.install(opts);
+    expect(read(configFile())).toBe(once);
+    expect(again.notes.join("\n")).toContain("already gets its key from local/helper");
+    await m.adapter.uninstall(box.home);
+    expect(read(configFile())).toBe(USER_CONFIG);
+
+    // A different auth for that provider is still a conflict.
+    await m.adapter.install(opts);
+    await putSecret("local/other", ["helper"]);
+    await expect(
+      m.adapter.install({ home: box.home, modelKey: "local/other", provider: "custom" }),
+    ).rejects.toThrow(/already sets auth/);
+  });
+
   test("--provider picks another provider, existing or new", async () => {
     await putSecret("local/helper", ["helper"]);
     write(configFile(), USER_CONFIG);
@@ -676,6 +697,60 @@ describe("uninstall", () => {
   test("blockOutput is exactly {decision, reason}", () => {
     const out = make().adapter.blockOutput("because");
     expect(JSON.stringify(out)).toBe('{"decision":"block","reason":"because"}');
+  });
+
+  test("undo never reaches a line in another table: a profile's persistence stays", async () => {
+    const original = '[profiles.x.history]\npersistence = "none"\n\n[history]\nmax_bytes = 5\n';
+    write(configFile(), original);
+    const m = make();
+    await m.adapter.install({ home: box.home, noHistory: true });
+    write(configFile(), read(configFile()).replace("[history]\n", "[history]\n# mine\n"));
+    await m.adapter.uninstall(box.home);
+    expect(read(configFile())).toBe(
+      '[profiles.x.history]\npersistence = "none"\n\n[history]\n# mine\nmax_bytes = 5\n',
+    );
+    expect(m.logs).toEqual([]);
+  });
+
+  test("an edit that cannot be undone is left and reported, by its first line", async () => {
+    write(configFile(), USER_CONFIG);
+    const m = make();
+    await m.adapter.install({ home: box.home, noHistory: true });
+    const edited = read(configFile())
+      .replace('persistence = "none"\n', "")
+      .replace(
+        /\n\[mcp_servers\.agent-vault\][^[]*/,
+        '\n[mcp_servers.agent-vault]\ncommand = "x"\nextra = 1\n',
+      );
+    write(configFile(), edited);
+    await m.adapter.uninstall(box.home);
+    const said = m.logs.join("\n");
+    expect(said).toContain(
+      `left persistence = "none" in ${configFile()} (it moved or was changed); remove it by hand`,
+    );
+    expect(said).toContain(
+      `left [mcp_servers.agent-vault] in ${configFile()} (it moved or was changed); remove it by hand`,
+    );
+    expect(read(configFile())).toContain("extra = 1");
+  });
+
+  test("removing our group says when it moved the user's hooks after it", async () => {
+    const m = make();
+    await m.adapter.install({ home: box.home });
+    const doc = parseJson(read(hooksFile())) as { hooks: Record<string, unknown[]> };
+    doc.hooks.UserPromptSubmit?.push({ hooks: [{ type: "command", command: "echo later" }] });
+    write(hooksFile(), `${JSON.stringify(doc, null, 2)}\n`);
+    await m.adapter.uninstall(box.home);
+    expect(m.logs.join("\n")).toContain(
+      "your hooks after agent-vault's moved position; Codex may now treat them as untrusted; re-run /hooks",
+    );
+
+    // A user hook that sat before ours does not move.
+    const quiet = make();
+    write(hooksFile(), USER_HOOKS);
+    await quiet.adapter.install({ home: box.home });
+    await quiet.adapter.uninstall(box.home);
+    expect(quiet.logs).toEqual([]);
   });
 
   test("with nothing installed, nothing is created", async () => {
@@ -834,6 +909,43 @@ describe("doctor", () => {
     const scope = (await out.adapter.doctor(box.home)).checks.find((c) => c.name === "scope");
     expect(scope).toMatchObject({ ok: true, severity: "info" });
     expect(scope?.detail).toContain("scrubs only files under it");
+  });
+
+  test("a hook that moved is red, even when the trust entry at its new place is someone else's", async () => {
+    const m = await installed();
+    trustAll();
+    expect((await check(m, "trust"))?.ok).toBe(true);
+
+    // A hook is added before ours: ours is now group 1, and group 1 has a trust entry already.
+    const doc = parseJson(read(hooksFile())) as { hooks: Record<string, unknown[]> };
+    doc.hooks.UserPromptSubmit?.unshift({ hooks: [{ type: "command", command: "echo first" }] });
+    write(hooksFile(), `${JSON.stringify(doc, null, 2)}\n`);
+    const theirs = trust("user_prompt_submit", 1, 0);
+    const red = await check(m, "trust");
+    expect(red).toMatchObject({
+      ok: false,
+      detail: expect.stringContaining(
+        "our hook moved from 0:0 to 1:0; Codex keys trust by position; re-run /hooks and trust it",
+      ),
+    });
+
+    // After a re-install, the hash at the new place is still not ours, until Codex writes a new one.
+    await m.adapter.install({ home: box.home });
+    expect((await check(m, "trust"))?.ok).toBe(false);
+    write(configFile(), read(configFile()).replace(theirs, randomHash()));
+    expect((await check(m, "trust"))?.ok).toBe(true);
+  });
+
+  test("a [mcp_servers.agent-vault] that is not ours is red with 'different command'", async () => {
+    const m = await installed();
+    write(
+      configFile(),
+      '[mcp_servers.agent-vault]\ncommand = "/old/place/agent-vault"\nargs = ["mcp"]\n',
+    );
+    expect(await check(m, "mcp")).toMatchObject({
+      ok: false,
+      detail: expect.stringContaining("different command"),
+    });
   });
 
   test("hooks missing, or pointing at a binary that is gone, are red with the fix", async () => {
