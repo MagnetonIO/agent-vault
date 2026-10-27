@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -459,6 +460,141 @@ describe("storage hygiene", () => {
     for (const side of [`${paths.dbFile}-wal`, `${paths.dbFile}-shm`]) {
       if (fs.existsSync(side)) expect(fs.statSync(side).mode & 0o077).toBe(0);
     }
+    vault.close();
+  });
+});
+
+/** A store whose `save` writes the key and then throws, like a keyring that fails mid-write. */
+class WriteThenThrowStore extends MemoryKeyStore {
+  failSaves = false;
+  override async save(k: Uint8Array): Promise<void> {
+    await super.save(k);
+    if (this.failSaves) throw new Error("keyring write failed");
+  }
+}
+
+describe("recovery rollback", () => {
+  test("a failing save restores the old root key and leaves the vault openable", async () => {
+    const flaky = new WriteThenThrowStore();
+    const { vault, recoveryWords: words } = await initVault({ paths, store: flaky });
+    vault.putSecret("a", enc.encode("kept"));
+    vault.close();
+    const oldKey = await flaky.load();
+
+    flaky.failSaves = true;
+    await expect(recoverVault({ paths, store: flaky, words })).rejects.toThrow(
+      "keyring write failed",
+    );
+    flaky.failSaves = false;
+
+    expect(await flaky.load()).toEqual(oldKey);
+    const reopened = await openVault({ paths, store: flaky });
+    expect(dec.decode(reopened.readValue("a"))).toBe("kept");
+    reopened.close();
+  });
+
+  test("a failing save on a store that had no key leaves it empty", async () => {
+    const { vault, recoveryWords: words } = await initVault({ paths, store });
+    vault.putSecret("a", enc.encode("kept"));
+    vault.close();
+
+    const empty = new WriteThenThrowStore();
+    empty.failSaves = true;
+    await expect(recoverVault({ paths, store: empty, words })).rejects.toThrow(
+      "keyring write failed",
+    );
+    expect(await empty.load()).toBeNull();
+
+    const reopened = await openVault({ paths, store });
+    expect(dec.decode(reopened.readValue("a"))).toBe("kept");
+    reopened.close();
+  });
+});
+
+describe("concurrent access", () => {
+  test("a write waits for another connection's lock instead of failing", async () => {
+    const { vault } = await initVault({ paths, store });
+    // node:sqlite blocks the thread while it waits, so the lock holder must be another process.
+    const holder = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const { DatabaseSync } = require("node:sqlite");
+         const db = new DatabaseSync(process.argv[1]);
+         db.exec("BEGIN IMMEDIATE");
+         console.log("locked");
+         setTimeout(() => { db.exec("ROLLBACK"); process.exit(0); }, 200);`,
+        paths.dbFile,
+      ],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+    const exited = new Promise<void>((resolve) => holder.on("exit", () => resolve()));
+    await new Promise<void>((resolve, reject) => {
+      holder.on("error", reject);
+      holder.stdout.once("data", () => resolve());
+    });
+
+    const started = Date.now();
+    expect(() => vault.putSecret("a", enc.encode("v"))).not.toThrow();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+    await exited;
+    expect(dec.decode(vault.readValue("a"))).toBe("v");
+    vault.close();
+  });
+
+  test("two racing inits give one vault and one VaultExistsError", async () => {
+    const [s1, s2] = [new MemoryKeyStore(), new MemoryKeyStore()];
+    const results = await Promise.allSettled([
+      initVault({ paths, store: s1 }),
+      initVault({ paths, store: s2 }),
+    ]);
+    const won = results.filter((r) => r.status === "fulfilled");
+    const lost = results.filter((r) => r.status === "rejected");
+    expect(won).toHaveLength(1);
+    expect(lost).toHaveLength(1);
+    expect((lost[0] as PromiseRejectedResult).reason).toBeInstanceOf(VaultExistsError);
+    (won[0] as PromiseFulfilledResult<{ vault: { close(): void } }>).value.vault.close();
+
+    // Exactly the winner's store holds a key, and it opens the vault.
+    const keys = [await s1.load(), await s2.load()];
+    expect(keys.filter((k) => k !== null)).toHaveLength(1);
+    const winner = keys[0] ? s1 : s2;
+    (await openVault({ paths, store: winner })).close();
+  });
+});
+
+describe("WAL residue", () => {
+  const walBytes = () =>
+    fs.existsSync(`${paths.dbFile}-wal`) ? fs.readFileSync(`${paths.dbFile}-wal`) : Buffer.alloc(0);
+  const ciphertextOf = (name: string): Buffer =>
+    Buffer.from(
+      withRawDb(
+        (db) =>
+          db.prepare("SELECT ciphertext FROM secrets WHERE name = ?").get(name)
+            .ciphertext as Uint8Array,
+      ),
+    );
+  // Any 32 bytes of a random ciphertext identify the row.
+  const needle = (ct: Buffer) => ct.subarray(0, 32);
+
+  test("remove leaves no copy of the ciphertext in the wal or the db", async () => {
+    const { vault } = await initVault({ paths, store });
+    vault.putSecret("a", enc.encode("value-to-delete"));
+    const gone = needle(ciphertextOf("a"));
+    expect(walBytes().includes(gone)).toBe(true); // the wal does hold it before remove
+    vault.remove("a");
+    expect(walBytes().includes(gone)).toBe(false);
+    expect(fs.readFileSync(paths.dbFile).includes(gone)).toBe(false);
+    vault.close();
+  });
+
+  test("overwrite leaves no copy of the old ciphertext in the wal or the db", async () => {
+    const { vault } = await initVault({ paths, store });
+    vault.putSecret("a", enc.encode("old-value"));
+    const old = needle(ciphertextOf("a"));
+    vault.putSecret("a", enc.encode("new-value"));
+    expect(walBytes().includes(old)).toBe(false);
+    expect(fs.readFileSync(paths.dbFile).includes(old)).toBe(false);
     vault.close();
   });
 });

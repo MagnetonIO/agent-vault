@@ -13,7 +13,7 @@ import {
   seal,
 } from "@agent-vault/crypto";
 import { ensurePrivateDir, type RootKeyStore, type VaultPaths } from "@agent-vault/platform";
-import { type Db, inTransaction, inTransactionSync, openDb } from "./db.js";
+import { checkpointWal, type Db, inTransaction, inTransactionSync, openDb } from "./db.js";
 import {
   InvalidNameError,
   MetadataTamperError,
@@ -114,6 +114,29 @@ function secretMac(macKey: Uint8Array, r: Omit<SecretRow, "ciphertext" | "meta_m
   );
 }
 
+const fileLocks = new Map<string, Promise<void>>();
+
+/**
+ * Run `fn` after every earlier call for the same file has finished. `initVault` and
+ * `recoverVault` hold a SQLite write lock across an await; a second connection in this process
+ * would block the thread waiting on it, so the event loop could never let the first finish.
+ * Other processes wait on the busy timeout instead.
+ */
+async function serialized<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const prev = fileLocks.get(file) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  fileLocks.set(file, tail);
+  try {
+    return await run;
+  } finally {
+    if (fileLocks.get(file) === tail) fileLocks.delete(file);
+  }
+}
+
 function readMeta(db: Db): MetaRow | undefined {
   return db
     .prepare("SELECT vault_id, schema_version, wrapped_dk_device, wrapped_dk_recovery FROM meta")
@@ -194,7 +217,7 @@ export class Vault {
   ): SecretMeta {
     this.#assertOpen();
     assertName(name);
-    return inTransactionSync(this.#db, () => {
+    const { meta, overwrote } = inTransactionSync(this.#db, () => {
       const existing = this.#verifiedRow(name);
       const now = new Date().toISOString();
       const fields = {
@@ -232,8 +255,11 @@ export class Vault {
           row.updated_at,
           row.meta_mac,
         );
-      return this.#toMeta(row);
+      return { meta: this.#toMeta(row), overwrote: existing !== undefined };
     });
+    // The old ciphertext sits in the WAL until it is checkpointed.
+    if (overwrote) checkpointWal(this.#db);
+    return meta;
   }
 
   /** Metadata for every secret, by name. Never a value. Throws MetadataTamperError. */
@@ -256,10 +282,12 @@ export class Vault {
   remove(name: string): boolean {
     this.#assertOpen();
     assertName(name);
-    return inTransactionSync(
+    const removed = inTransactionSync(
       this.#db,
       () => Number(this.#db.prepare("DELETE FROM secrets WHERE name = ?").run(name).changes) > 0,
     );
+    checkpointWal(this.#db);
+    return removed;
   }
 
   addTag(name: string, tag: string): void {
@@ -300,12 +328,17 @@ export class Vault {
     this.#closed = true;
     this.#dk.fill(0);
     this.#macKey.fill(0);
+    checkpointWal(this.#db);
     this.#db.close();
   }
 }
 
 /** Create a new vault. The 24 recovery words are returned once and stored nowhere. */
-export async function initVault({
+export function initVault(loc: Locations): Promise<{ vault: Vault; recoveryWords: string[] }> {
+  return serialized(loc.paths.dbFile, () => initLocked(loc));
+}
+
+async function initLocked({
   paths,
   store,
 }: Locations): Promise<{ vault: Vault; recoveryWords: string[] }> {
@@ -371,7 +404,11 @@ export async function openVault({ paths, store }: Locations): Promise<Vault> {
  * key is made, saved to `store`, and the device wrap is replaced in one transaction. The recovery
  * wrap is untouched, so the same words keep working.
  */
-export async function recoverVault({
+export function recoverVault(loc: Locations & { words: string[] }): Promise<Vault> {
+  return serialized(loc.paths.dbFile, () => recoverLocked(loc));
+}
+
+async function recoverLocked({
   paths,
   store,
   words,
@@ -391,13 +428,24 @@ export async function recoverVault({
     const newRk = randomKey();
     rk = newRk;
     const wrapped = seal(newRk, dk, dkAad(meta.vault_id, "dk_device"));
-    await inTransaction(db, async () => {
-      db.prepare("UPDATE meta SET wrapped_dk_device = ? WHERE vault_id = ?").run(
-        wrapped,
-        meta.vault_id,
+    // If saving the new key or committing fails, put the store back as it was: a half-written
+    // keyring entry must not lock this device out of a vault whose db is unchanged.
+    const old = await store.load();
+    try {
+      await inTransaction(
+        db,
+        async () => {
+          db.prepare("UPDATE meta SET wrapped_dk_device = ? WHERE vault_id = ?").run(
+            wrapped,
+            meta.vault_id,
+          );
+          await store.save(newRk);
+        },
+        () => (old ? store.save(old) : store.remove()),
       );
-      await store.save(newRk);
-    });
+    } finally {
+      old?.fill(0);
+    }
     return new Vault(db, meta.vault_id, dk);
   } catch (err) {
     dk?.fill(0);
