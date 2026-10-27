@@ -429,8 +429,15 @@ async function recoverLocked({
     rk = newRk;
     const wrapped = seal(newRk, dk, dkAad(meta.vault_id, "dk_device"));
     // If saving the new key or committing fails, put the store back as it was: a half-written
-    // keyring entry must not lock this device out of a vault whose db is unchanged.
-    const old = await store.load();
+    // keyring entry must not lock this device out of a vault whose db is unchanged. An entry
+    // that cannot be read (forgotten passphrase, corrupt keyfile) is what recovery replaces, so
+    // there is nothing to restore and nothing to remove.
+    let previous: Uint8Array | null | undefined;
+    try {
+      previous = await store.load();
+    } catch {
+      previous = undefined;
+    }
     try {
       await inTransaction(
         db,
@@ -441,10 +448,12 @@ async function recoverLocked({
           );
           await store.save(newRk);
         },
-        () => (old ? store.save(old) : store.remove()),
+        previous === undefined
+          ? undefined
+          : () => (previous ? store.save(previous) : store.remove()),
       );
     } finally {
-      old?.fill(0);
+      previous?.fill(0);
     }
     return new Vault(db, meta.vault_id, dk);
   } catch (err) {

@@ -3,7 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DecryptError, randomKey, recoveryWords } from "@agent-vault/crypto";
-import { getPaths, MemoryKeyStore, type VaultPaths } from "@agent-vault/platform";
+import {
+  getPaths,
+  KeyfileCorruptError,
+  KeyringValueInvalidError,
+  MemoryKeyStore,
+  type VaultPaths,
+  WrongPassphraseError,
+} from "@agent-vault/platform";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   InvalidNameError,
@@ -511,6 +518,59 @@ describe("recovery rollback", () => {
   });
 });
 
+/** A store whose entry cannot be read: the situation recovery exists for. */
+class UnreadableStore extends MemoryKeyStore {
+  unreadable = true;
+  constructor(private readonly failure: () => Error) {
+    super();
+  }
+  override async load(): Promise<Uint8Array | null> {
+    if (this.unreadable) throw this.failure();
+    return super.load();
+  }
+}
+
+describe("recovery onto an unreadable key store", () => {
+  test.each([
+    ["WrongPassphraseError", () => new WrongPassphraseError()],
+    ["KeyfileCorruptError", () => new KeyfileCorruptError("bad header")],
+    ["KeyringValueInvalidError", () => new KeyringValueInvalidError("wrong length")],
+  ])("succeeds when load() throws %s and the vault opens with the new key", async (_n, failure) => {
+    const { vault, recoveryWords: words } = await initVault({ paths, store });
+    vault.putSecret("a", enc.encode("kept"));
+    vault.close();
+
+    const broken = new UnreadableStore(failure);
+    const recovered = await recoverVault({ paths, store: broken, words });
+    expect(dec.decode(recovered.readValue("a"))).toBe("kept");
+    recovered.close();
+
+    broken.unreadable = false;
+    const reopened = await openVault({ paths, store: broken });
+    expect(dec.decode(reopened.readValue("a"))).toBe("kept");
+    reopened.close();
+  });
+
+  test("a failing save does not call remove() when the old key was unreadable", async () => {
+    const { vault, recoveryWords: words } = await initVault({ paths, store });
+    vault.close();
+    class Failing extends UnreadableStore {
+      removed = false;
+      override async save(): Promise<void> {
+        throw new Error("keyring write failed");
+      }
+      override async remove(): Promise<void> {
+        this.removed = true;
+      }
+    }
+    const broken = new Failing(() => new KeyfileCorruptError("bad header"));
+    await expect(recoverVault({ paths, store: broken, words })).rejects.toThrow(
+      "keyring write failed",
+    );
+    expect(broken.removed).toBe(false);
+  });
+});
+
 describe("concurrent access", () => {
   test("a write waits for another connection's lock instead of failing", async () => {
     const { vault } = await initVault({ paths, store });
@@ -560,6 +620,52 @@ describe("concurrent access", () => {
     expect(keys.filter((k) => k !== null)).toHaveLength(1);
     const winner = keys[0] ? s1 : s2;
     (await openVault({ paths, store: winner })).close();
+  });
+});
+
+describe("WAL checkpoint does not stall", () => {
+  test("remove and close return promptly while another connection holds a read transaction", async () => {
+    const { vault } = await initVault({ paths, store });
+    vault.putSecret("a", enc.encode("v"));
+    const reader = openDb(paths.dbFile);
+    reader.exec("BEGIN");
+    reader.prepare("SELECT count(*) FROM secrets").get();
+
+    let started = Date.now();
+    expect(vault.remove("a")).toBe(true);
+    expect(Date.now() - started).toBeLessThan(500);
+
+    vault.putSecret("b", enc.encode("v"));
+    started = Date.now();
+    vault.close();
+    expect(Date.now() - started).toBeLessThan(500);
+    reader.exec("ROLLBACK");
+    reader.close();
+  });
+
+  test("the busy timeout is back to 5000 ms after a checkpoint", async () => {
+    const { vault } = await initVault({ paths, store });
+    vault.putSecret("a", enc.encode("v"));
+    vault.remove("a");
+    // A write must still wait for another process's lock afterwards (see the lock test above).
+    const holder = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const { DatabaseSync } = require("node:sqlite");
+         const db = new DatabaseSync(process.argv[1]);
+         db.exec("BEGIN IMMEDIATE");
+         console.log("locked");
+         setTimeout(() => { db.exec("ROLLBACK"); process.exit(0); }, 200);`,
+        paths.dbFile,
+      ],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+    const exited = new Promise<void>((resolve) => holder.on("exit", () => resolve()));
+    await new Promise<void>((resolve) => holder.stdout.once("data", () => resolve()));
+    expect(() => vault.putSecret("b", enc.encode("v"))).not.toThrow();
+    await exited;
+    vault.close();
   });
 });
 

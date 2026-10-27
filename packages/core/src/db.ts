@@ -112,11 +112,22 @@ export function inTransactionSync<T>(db: Db, fn: () => T): T {
   }
 }
 
-/** Fold the WAL into the main file and truncate it, so freed secret bytes do not linger there. */
+/**
+ * Fold the WAL into the main file and truncate it, so freed secret bytes do not linger there.
+ * Never waits: a reader in another process would otherwise stall the caller for the whole busy
+ * timeout. If it cannot truncate now, the residue goes at the next checkpoint or last close.
+ */
 export function checkpointWal(db: Db): void {
   try {
+    db.exec("PRAGMA busy_timeout = 0");
     db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   } catch {
-    // Best effort: a reader in another process can block it, and SQLite checkpoints later anyway.
+    // Best effort.
+  } finally {
+    try {
+      db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    } catch {
+      // The connection is already closed or broken; nothing left to restore.
+    }
   }
 }
