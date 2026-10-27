@@ -195,11 +195,13 @@ Three paths, strongest first:
 ### 2. Daemon (`vaultd`)
 
 - **IPC:** JSON-RPC over:
-  - Unix domain socket (macOS/Linux) in a `0700` per-user directory (`$XDG_RUNTIME_DIR` on Linux). Verify the peer uid.
-  - Named pipe (Windows):
-    - The default pipe DACL grants Everyone read, so **set an explicit DACL** for the user SID.
-    - Use a per-user pipe name and `FILE_FLAG_FIRST_PIPE_INSTANCE` so another process cannot squat the name and impersonate vaultd.
-    - Node `net` can't set a pipe DACL. That needs a native helper or the loopback-TCP+token fallback. **Spike.**
+  - **macOS/Linux: Unix domain socket** `vaultd.sock` in a `0700` user-owned directory. The directory is the access control (Node has no peer-uid API).
+    - Linux: `$XDG_RUNTIME_DIR/agent-vault`, else `$dataDir/run`. macOS: `~/Library/Application Support/agent-vault/run`.
+    - Socket path ≤103 bytes (macOS) / ≤107 (Linux), else `<tmpdir>/av-<uid>/<sha256[0:16]>.sock` in a `0700` dir; refuse if another user owns it.
+  - **Windows: loopback TCP + token** (Spike S2; named pipe rejected because Node `net` can't set a pipe DACL).
+    - `127.0.0.1:0`, with `{port}` in `endpoint.json` and a 32-byte token, under `%LOCALAPPDATA%\agent-vault\run` locked by `icacls` (`/inheritance:r /grant:r %USERNAME%:F`, then `/remove *S-1-5-18` and `*S-1-5-32-544`).
+    - **Mutual, channel-bound handshake** before any payload: server proves `HMAC(token,"srv"‖nonce_c‖nonce_s)`, then client proves `HMAC(token,"cli"‖nonce_s‖nonce_c)`. A port squatter learns nothing. Token rotates per daemon start; connection cap 64; client connect timeout 2 s.
+    - Decision record: `docs/spikes/s2-ipc.md`.
 - **Responsibilities:** unlock lifecycle, policy enforcement, audit writes, capture page, sync engine, session issuance.
 - **Service manager (one per OS, no admin):**
 
@@ -322,7 +324,7 @@ Append-only, **hash-chained** log: each entry carries an HMAC of the previous en
 | Placeholder reflected into a body | Substitute only in the template auth slot | T2 |
 | Upstream echoes credential | Response scrubbing | T2 |
 | Local CA key theft | Per-process trust, name-constrained CA, key in vault | T2/T3 |
-| IPC impersonation (pipe squatting) | Per-user `0700` socket dir; Windows DACL + first-instance flag | T3-lite |
+| IPC impersonation (socket/port squatting) | Per-user `0700` socket dir; Windows mutual HMAC handshake over a user-only token file | T3-lite |
 | Audit tampering | Hash chain (evident, not proof) | T2 |
 | Stolen session token | TTL + revocable + host/method/path scope | T2 |
 | Live DB sync (WAL) | Forbidden: record-level sync | — |
@@ -341,7 +343,7 @@ Append-only, **hash-chained** log: each entry carries an HMAC of the previous en
 1. You paste `ghp_…` into the prompt.
 2. The `UserPromptSubmit` hook detects it, stores it as `github/pat`, and **blocks** the prompt. The key never reaches the model.
 3. The hook replies: "Stored as `github/pat`. Re-send using `vault://github/pat`."
-4. On `Stop`, the scrubber removes the key from the transcript and `~/.claude/history.jsonl`. Audit records `captured`.
+4. On `SessionEnd` (and again at the next `SessionStart`), the scrubber removes the key from the transcript and `~/.claude/history.jsonl`. Audit records `captured`.
 5. The secret is tagged `exposed-locally`. `agent-vault list` suggests rotation.
 
 **Apify collector:**
@@ -360,7 +362,7 @@ Append-only, **hash-chained** log: each entry carries an HMAC of the previous en
 
 | Phase | Deliverable | Why this order |
 |-------|-------------|----------------|
-| **0. Spikes (1 wk)** | 1) Node SEA + native addons on all 3 OSes. 2) Windows pipe DACL from Node. 3) Per harness: what a blocked prompt leaves on disk, and is scrub safe? | De-risk before building |
+| **0. Spikes (done)** | 1) SEA + addons → `node:sqlite`, addons beside the binary. 2) Windows IPC → loopback TCP + mutual handshake. 3) Harness hooks → Claude/Codex block + `SessionEnd` scrub; OpenCode via grab/MCP. Records in `docs/spikes/` | De-risk before building |
 | **1. MVP** | Vault core + recovery key + capture (A, B for Claude Code & Codex, C) + `install`/`migrate`/`scan` for Claude Code, Codex, OpenCode + MCP + `run` with redaction + hash-chained audit | Kills paste/.env leaks (T1). Usable as the default keystore on day one |
 | **2. Proxy + gate** | Base-URL proxy → forward proxy; sessions; host/method/path policy; human-presence gate on admin ops; `reveal` | T2 resistance without any cloud |
 | **3. Sync** | Per-bundle keys, record-level encrypted sync, SAS enrollment, revocation | Laptop ↔ desktop |
@@ -375,14 +377,14 @@ Append-only, **hash-chained** log: each entry carries an HMAC of the previous en
 |-------|--------|----------|
 | Runtime | **Node 24 LTS** (Node 20 reached EOL 2026-04-30) | MCP + Cloudflare are TS-native. **Alt:** Rust core for real memory zeroing and no native-addon packaging pain; slower MVP |
 | Crypto | `libsodium-wrappers` or `@noble/ciphers` (XChaCha20-Poly1305), behind a thin `packages/crypto` | Swap-able for a Rust port |
-| SQLite | `better-sqlite3` (native addon); evaluate built-in `node:sqlite` in the spike to drop one addon | Native addons complicate SEA |
+| SQLite | **`node:sqlite`** (built in; passed on all 3 OSes in Spike S1). Fallback: `better-sqlite3` | One fewer native addon to ship |
 | OS credential store | **`@napi-rs/keyring`** (pin Linux store) | One API → Keychain / Secret Service / Cred Manager |
 | Secret detection | gitleaks-compatible rule set + entropy | Shared by hook, `scan`, `migrate`, redaction |
 | MCP | `@modelcontextprotocol/sdk`, URL-mode elicitation | Needs spec 2025-11-25 clients for in-harness capture |
 | Proxy | Custom loopback reverse proxy (B1); CONNECT + per-process CA (B2) | B2 needs TLS interception |
 | Cloud | **Cloudflare Workers + Durable Objects + R2** | DOs fit lease/revocation state |
 | Monorepo | pnpm workspaces: `core`, `crypto`, `daemon`, `cli`, `mcp`, `proxy`, `detect`, `adapters` (claude-code, codex, opencode), `cloud`, `platform` | `platform` = paths/IPC/service only |
-| Packaging | **Node SEA** binaries + Homebrew tap, deb/rpm, winget/MSI. ~~`pkg`~~ (archived Jan 2024), ~~`nexe`~~ (still beta) | **SEA can't embed native addons directly.** Ship `.node` files beside the binary or extract at runtime. Spike first |
+| Packaging | **Node SEA** binaries + Homebrew tap, deb/rpm, winget/MSI. ~~`pkg`~~ (archived Jan 2024), ~~`nexe`~~ (still beta) | Spike S1: esbuild CJS bundle → SEA, with `addons/*.node` beside the binary loaded via `process.dlopen`. Pin an exact Node version per release |
 
 ---
 
@@ -391,7 +393,7 @@ Append-only, **hash-chained** log: each entry carries an HMAC of the previous en
 | Concern | macOS | Linux | Windows |
 |---------|-------|-------|---------|
 | Credential store | `@napi-rs/keyring` (signed binary for a stable ACL) | same, **pinned to `secret-service`**; Argon2id keyfile if absent | same |
-| Daemon IPC | Unix socket in `0700` dir | Unix socket in `$XDG_RUNTIME_DIR` | Named pipe, explicit DACL, per-user name, first-instance |
+| Daemon IPC | Unix socket in `0700` dir | Unix socket in `$XDG_RUNTIME_DIR/agent-vault` | Loopback TCP + token file (icacls user-only) + mutual HMAC handshake |
 | Paths | `~/Library/Application Support/agent-vault` | `$XDG_DATA_HOME/agent-vault` | `%LOCALAPPDATA%\agent-vault` |
 | Service manager | launchd LaunchAgent | systemd `--user` (lazy start) | Task Scheduler at logon |
 | Env injection | child env | child env | child env; `.cmd` shims need careful escaping |
@@ -422,7 +424,7 @@ Append-only, **hash-chained** log: each entry carries an HMAC of the previous en
 ## Open questions
 
 1. **Name collision:** "agent-vault" vs. Infisical's "Agent Vault" product. Rename before any public release?
-2. **OpenCode prompt capture:** no documented prompt hook. Research plugin `message.*` events, or upstream a PR.
+2. **OpenCode prompt capture:** MVP routes OpenCode keys through `grab` and MCP `vault_capture`. Next step: test whether plugin `message.updated` / `message.part.updated` (present in the 2.1.4 binary) can rewrite text, or upstream a prompt hook.
 3. **Upstream asks (the only airtight fix for Path B):** a prompt-rewrite/redaction hook in Claude Code, Codex, and OpenCode. File feature requests once the MVP proves demand.
 4. **Human-presence mechanism:**
    - OS biometrics (Touch ID / Windows Hello / polkit) means per-OS code.
