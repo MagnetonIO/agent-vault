@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -102,6 +103,18 @@ describe("ensureDaemon", () => {
         timeoutMs: 500,
       }),
     ).rejects.toThrow(/did not start within 500 ms/);
+  });
+
+  test("at the deadline the error points at an existing vaultd.lock", async () => {
+    fs.mkdirSync(tmp.paths.runtimeDir, { recursive: true, mode: 0o700 });
+    const lock = path.join(tmp.paths.runtimeDir, "vaultd.lock");
+    fs.writeFileSync(lock, JSON.stringify({ pid: process.ppid, bootId: "", startedAt: "x" }));
+    await expect(
+      ensureDaemon(tmp.paths, {
+        spawnArgv: [process.execPath, "-e", "process.exit(0)"],
+        timeoutMs: 400,
+      }),
+    ).rejects.toThrow(`vaultd.lock exists at ${lock}; if no daemon is running, delete it`);
   });
 
   test("reports a command that cannot be spawned", async () => {

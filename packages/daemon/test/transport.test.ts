@@ -202,26 +202,38 @@ describe("tcp connection caps", () => {
       }
     ).port;
 
-  test("15 silent connections do not stop a real client; the 17th is closed", async () => {
+  test("a flood of silent connections cannot lock out a real client: the oldest is evicted", async () => {
     const silent: RawPeer[] = [];
     try {
-      for (let i = 0; i < 15; i++) silent.push(await RawPeer.plain(port()));
+      for (let i = 0; i < 16; i++) silent.push(await RawPeer.plain(port()));
+      await new Promise((r) => setTimeout(r, 100)); // let the daemon accept all 16
       const real = await env.connect();
       expect(await real.call("secret.list")).toEqual([]);
-
-      // 15 silent are pending (the real client is authenticated): a 16th fills the cap, a 17th is refused.
-      silent.push(await RawPeer.plain(port()));
-      const over = await RawPeer.plain(port());
-      silent.push(over);
-      expect(await over.waitClosed(1000)).toBe(true);
-      expect(silent[0]?.closed).toBe(false);
+      // The oldest silent connection made room; the newer ones were left alone.
+      expect(await silent[0]?.waitClosed(1000)).toBe(true);
+      expect(silent[15]?.closed).toBe(false);
+      // The authenticated client was never touched.
+      expect(await env.client.call("secret.list")).toEqual([]);
     } finally {
       for (const p of silent) p.destroy();
     }
-    // Once the silent ones are cut off (1.5 s step timer), connections are accepted again.
-    await new Promise((r) => setTimeout(r, 1700));
-    const again = await env.connect();
-    expect(await again.call("secret.list")).toEqual([]);
+  });
+
+  test("a stream of newcomers evicts silent connections one at a time, never authenticated ones", async () => {
+    const silent: RawPeer[] = [];
+    try {
+      for (let i = 0; i < 16; i++) silent.push(await RawPeer.plain(port()));
+      await new Promise((r) => setTimeout(r, 100));
+      const later: RawPeer[] = [];
+      for (let i = 0; i < 4; i++) later.push(await RawPeer.plain(port()));
+      silent.push(...later);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(silent.slice(0, 4).every((p) => p.closed)).toBe(true);
+      expect(silent.slice(4).every((p) => !p.closed)).toBe(true);
+      expect(await env.client.call("status")).toBeTruthy();
+    } finally {
+      for (const p of silent) p.destroy();
+    }
   });
 
   test("silent connections do not use up authenticated slots, nor the reverse", async () => {

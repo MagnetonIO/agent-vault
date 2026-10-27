@@ -8,17 +8,15 @@ import { DaemonAlreadyRunningError } from "./errors.js";
 
 /** An empty or unparseable lock this old is a crashed starter's, not one mid-write. */
 const STALE_UNPARSEABLE_MS = 5000;
-/** Windows has no boot id; two readings of "now minus uptime" agree to within this. */
-const WIN_BOOT_TOLERANCE_MS = 60_000;
 
 export const lockPath = (runtimeDir: string): string => path.join(runtimeDir, "vaultd.lock");
 
 /**
  * Identifies this boot of the machine, so a lock left by a pid from before a reboot is not
- * mistaken for a live daemon when the OS hands the pid to something else. "" if unreadable, which
- * `sameBoot` treats as "cannot tell", never as "different".
+ * mistaken for a live daemon when the OS hands the pid to something else. "" if unreadable or
+ * unavailable (Windows uses uptime instead, see `isStale`), which `sameBoot` treats as "cannot
+ * tell", never as "different".
  *   Linux: /proc/sys/kernel/random/boot_id. macOS: kern.bootsessionuuid.
- *   Windows: `win:<boot time in ms>`, compared with a tolerance.
  */
 export function readBootId(platform: NodeJS.Platform = process.platform): string {
   try {
@@ -31,7 +29,6 @@ export function readBootId(platform: NodeJS.Platform = process.platform): string
         stdio: ["ignore", "pipe", "ignore"],
       }).trim();
     }
-    if (platform === "win32") return `win:${Math.round(Date.now() - os.uptime() * 1000)}`;
   } catch {
     // fall through
   }
@@ -39,12 +36,10 @@ export function readBootId(platform: NodeJS.Platform = process.platform): string
 }
 
 export function sameBoot(a: string, b: string): boolean {
-  if (a === "" || b === "") return true;
-  if (a.startsWith("win:") && b.startsWith("win:")) {
-    return Math.abs(Number(a.slice(4)) - Number(b.slice(4))) <= WIN_BOOT_TOLERANCE_MS;
-  }
-  return a === b;
+  return a === "" || b === "" || a === b;
 }
+
+const uptimeMs = (): number => os.uptime() * 1000;
 
 /** EPERM means the process exists but belongs to someone else: still alive. */
 function isAlive(pid: number): boolean {
@@ -56,7 +51,7 @@ function isAlive(pid: number): boolean {
   }
 }
 
-type LockInfo = { pid: number; bootId: string; startedAt: string };
+type LockInfo = { pid: number; bootId: string; uptimeMs?: number; startedAt: string };
 
 function parseLock(text: string): LockInfo | null {
   try {
@@ -77,10 +72,11 @@ function parseLock(text: string): LockInfo | null {
 }
 
 /** Create the lock file. Returns what it holds, or null if it already exists. */
-function tryCreate(file: string): string | null {
+function tryCreate(file: string, platform: NodeJS.Platform): string | null {
   const text = JSON.stringify({
     pid: process.pid,
-    bootId: readBootId(),
+    bootId: readBootId(platform),
+    uptimeMs: uptimeMs(),
     startedAt: new Date().toISOString(),
   } satisfies LockInfo);
   let fd: number;
@@ -102,9 +98,15 @@ function tryCreate(file: string): string | null {
 }
 
 /** Is the lock's holder gone? A live pid from this boot is never stale, whatever else is true. */
-function isStale(text: string, mtimeMs: number): boolean {
+function isStale(text: string, mtimeMs: number, platform: NodeJS.Platform): boolean {
   const info = parseLock(text);
-  if (info) return !isAlive(info.pid) || !sameBoot(info.bootId, readBootId());
+  if (info) {
+    if (!isAlive(info.pid)) return true;
+    // Windows has no boot id, and its wall clock can step; uptime only ever resets on a reboot.
+    if (platform === "win32")
+      return typeof info.uptimeMs === "number" && uptimeMs() < info.uptimeMs;
+    return !sameBoot(info.bootId, readBootId(platform));
+  }
   // Legacy lock (a bare pid) or garbage.
   const trimmed = text.trim();
   if (/^\d+$/.test(trimmed) && Number(trimmed) > 0) return !isAlive(Number(trimmed));
@@ -116,7 +118,7 @@ function isStale(text: string, mtimeMs: number): boolean {
  * The file is renamed aside first, so of several racing reapers only one takes it, and a lock a
  * new holder created in the meantime is put back instead of deleted.
  */
-function reapStale(file: string): boolean {
+function reapStale(file: string, platform: NodeJS.Platform): boolean {
   let text: string;
   let mtimeMs: number;
   try {
@@ -126,7 +128,7 @@ function reapStale(file: string): boolean {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
     throw err;
   }
-  if (!isStale(text, mtimeMs)) return false;
+  if (!isStale(text, mtimeMs, platform)) return false;
 
   const aside = `${file}.stale.${process.pid}.${randomBytes(4).toString("hex")}`;
   try {
@@ -150,18 +152,22 @@ function reapStale(file: string): boolean {
 }
 
 /**
- * Take the single-instance lock `<runtimeDir>/vaultd.lock`, which holds `{ pid, bootId, startedAt }`.
+ * Take the single-instance lock `<runtimeDir>/vaultd.lock`, which holds `{ pid, bootId, uptimeMs, startedAt }`.
  * Synchronous, so concurrent starters (even in one process) are strictly ordered.
  *
  * An existing lock is reaped once, and only if its pid is dead or it was written in an earlier
- * boot. A live pid from this boot is never reaped, even if it is not really a daemon (a reused
+ * boot (boot id; on Windows, uptime lower than the lock's). A live pid from this boot is never reaped, even if it is not really a daemon (a reused
  * pid): that throws DaemonAlreadyRunningError naming the file so the user can delete it. Returns
  * the release function, which only removes the file while it still holds what we wrote.
  */
-export function acquireLock(runtimeDir: string): () => void {
+export function acquireLock(
+  runtimeDir: string,
+  platform: NodeJS.Platform = process.platform,
+): () => void {
   ensurePrivateDir(runtimeDir);
   const file = lockPath(runtimeDir);
-  const written = tryCreate(file) ?? (reapStale(file) ? tryCreate(file) : null);
+  const written =
+    tryCreate(file, platform) ?? (reapStale(file, platform) ? tryCreate(file, platform) : null);
   if (written === null) throw new DaemonAlreadyRunningError(file);
   return () => {
     try {

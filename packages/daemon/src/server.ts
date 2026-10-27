@@ -27,7 +27,7 @@ import { ERR, encodeLine, LineSplitter, MAX_LINE_BYTES, parseRequestLine } from 
 
 /** Authenticated connections (on unix, where there is no handshake, all connections). */
 export const MAX_CONNECTIONS = 64;
-/** tcp connections that have not finished the handshake yet. */
+/** tcp connections that have not finished the handshake yet; the oldest is evicted beyond this. */
 export const MAX_PENDING_CONNECTIONS = 16;
 /** Requests being handled at once on one connection; reading pauses beyond this. */
 export const MAX_IN_FLIGHT = 64;
@@ -154,9 +154,14 @@ async function listenTcp(
   return remove;
 }
 
-/** Connection counts: unauthenticated tcp connections are capped apart from authenticated ones. */
+/**
+ * Connection accounting. Unauthenticated tcp connections are kept in their own set, capped apart
+ * from authenticated ones; when it is full the OLDEST one is evicted for the newcomer, so a flood
+ * of silent connections can never lock real clients out. Authenticated connections are never
+ * evicted.
+ */
 class Limits {
-  #pending = 0;
+  readonly #pending = new Set<net.Socket>();
   #authed = 0;
   readonly #handshake: boolean;
 
@@ -164,30 +169,34 @@ class Limits {
     this.#handshake = handshake;
   }
 
-  /** Count a new connection. False if it is over the cap. */
-  admit(): boolean {
+  /** Count a new connection. False if it is over the cap (unix, or tcp only via `promote`). */
+  admit(socket: net.Socket): boolean {
     if (this.#handshake) {
-      if (this.#pending >= MAX_PENDING_CONNECTIONS) return false;
-      this.#pending++;
-    } else {
-      if (this.#authed >= MAX_CONNECTIONS) return false;
-      this.#authed++;
+      if (this.#pending.size >= MAX_PENDING_CONNECTIONS) {
+        const oldest = this.#pending.values().next().value as net.Socket;
+        this.#pending.delete(oldest);
+        oldest.destroy();
+      }
+      this.#pending.add(socket);
+      return true;
     }
-    return true;
-  }
-
-  /** A tcp connection passed the handshake. False if the authenticated cap is full (it stays pending). */
-  promote(): boolean {
     if (this.#authed >= MAX_CONNECTIONS) return false;
-    this.#pending--;
     this.#authed++;
     return true;
   }
 
-  /** The connection is gone; `counted` says which count it was in. */
-  release(counted: "pending" | "authed"): void {
-    if (counted === "authed") this.#authed--;
-    else this.#pending--;
+  /** A tcp connection passed the handshake. False if the authenticated cap is full. */
+  promote(socket: net.Socket): boolean {
+    this.#pending.delete(socket);
+    if (this.#authed >= MAX_CONNECTIONS) return false;
+    this.#authed++;
+    return true;
+  }
+
+  /** The connection is gone; `authenticated` says whether it had been counted as one. */
+  release(socket: net.Socket, authenticated: boolean): void {
+    if (authenticated) this.#authed--;
+    else this.#pending.delete(socket);
   }
 }
 
@@ -208,13 +217,13 @@ function serveConnection({ socket, token, dispatch, limits }: Conn): void {
   const splitter = new LineSplitter(token ? HANDSHAKE_LINE_MAX : MAX_LINE_BYTES);
   let timer: NodeJS.Timeout | undefined;
 
-  if (!limits.admit()) {
+  if (!limits.admit(socket)) {
     socket.destroy();
     return;
   }
   // Where this connection is counted: pending until the handshake passes (unix: never pending).
-  let counted: "pending" | "authed" = token === null ? "authed" : "pending";
-  socket.once("close", () => limits.release(counted));
+  let authenticated = token === null;
+  socket.once("close", () => limits.release(socket, authenticated));
 
   const armStepTimer = () => {
     clearTimeout(timer);
@@ -303,11 +312,11 @@ function serveConnection({ socket, token, dispatch, limits }: Conn): void {
           socket.destroy();
           return;
         }
-        if (!limits.promote()) {
+        if (!limits.promote(socket)) {
           socket.destroy(); // authenticated, but the daemon is full
           return;
         }
-        counted = "authed";
+        authenticated = true;
         phase = "rpc";
         clearTimeout(timer);
         splitter.max = MAX_LINE_BYTES;

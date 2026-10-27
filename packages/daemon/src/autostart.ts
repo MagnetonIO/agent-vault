@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ipcEndpoint, type VaultPaths } from "@agent-vault/platform";
 import { connect, type IpcClient } from "./client.js";
@@ -71,5 +72,10 @@ export async function ensureDaemon(
     }
   }
   if (last instanceof DaemonIdentityError) throw last;
-  throw new Error(`vaultd did not start within ${timeoutMs} ms`, { cause: last });
+  // A child that exits 0 because a stale lock names a reused pid ends up here.
+  const lock = lockPath(paths.runtimeDir);
+  const hint = fs.existsSync(lock)
+    ? `; vaultd.lock exists at ${lock}; if no daemon is running, delete it`
+    : "";
+  throw new Error(`vaultd did not start within ${timeoutMs} ms${hint}`, { cause: last });
 }

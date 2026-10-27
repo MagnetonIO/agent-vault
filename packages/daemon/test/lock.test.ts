@@ -1,11 +1,12 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { MemoryKeyStore } from "@agent-vault/platform";
 import { describe, expect, test } from "vitest";
 import { connect } from "../src/client.js";
 import { DaemonAlreadyRunningError } from "../src/errors.js";
-import { readBootId, sameBoot } from "../src/lock.js";
+import { acquireLock, readBootId, sameBoot } from "../src/lock.js";
 import { startDaemon } from "../src/server.js";
 import { useTmp } from "./helpers.js";
 
@@ -17,14 +18,16 @@ function deadPid(): number {
   return Number(r.stdout);
 }
 
-type LockContent = { pid: number; bootId: string; startedAt: string };
+type LockContent = { pid: number; bootId: string; uptimeMs: number; startedAt: string };
 
 describe("boot id", () => {
   test("the reader works on this OS and is stable within a boot", () => {
     const id = readBootId();
-    expect(id).not.toBe("");
-    if (process.platform === "win32") expect(id).toMatch(/^win:\d+$/);
-    else expect(id).toMatch(/^[0-9a-f-]{16,}$/i);
+    if (process.platform === "win32") {
+      expect(id).toBe(""); // Windows compares uptime instead
+    } else {
+      expect(id).toMatch(/^[0-9a-f-]{16,}$/i);
+    }
     expect(sameBoot(id, readBootId())).toBe(true);
   });
 
@@ -32,8 +35,7 @@ describe("boot id", () => {
     expect(sameBoot("a", "a")).toBe(true);
     expect(sameBoot("a", "b")).toBe(false);
     expect(sameBoot("", "b")).toBe(true);
-    expect(sameBoot("win:1000000", "win:1050000")).toBe(true);
-    expect(sameBoot("win:1000000", "win:1100000")).toBe(false);
+    expect(sameBoot("a", "")).toBe(true);
   });
 });
 
@@ -119,6 +121,40 @@ describe("single-instance lock", () => {
     } finally {
       await d.close();
     }
+  });
+
+  describe("Windows: uptime, not the wall clock", () => {
+    const withUptime = (uptimeMs: number) =>
+      writeLock(
+        JSON.stringify({
+          pid: process.ppid,
+          bootId: "",
+          uptimeMs,
+          startedAt: new Date().toISOString(),
+        }),
+      );
+
+    test("a live pid whose lock recorded a longer uptime is from before a reboot: reaped", () => {
+      withUptime(os.uptime() * 1000 + 3_600_000);
+      const release = acquireLock(tmp.paths.runtimeDir, "win32");
+      expect(readLock()).toMatchObject({ pid: process.pid });
+      release();
+    });
+
+    test("a live pid whose lock recorded a shorter uptime is the same boot: not reaped", () => {
+      withUptime(1000);
+      expect(() => acquireLock(tmp.paths.runtimeDir, "win32")).toThrow(DaemonAlreadyRunningError);
+      expect(readLock().pid).toBe(process.ppid);
+    });
+
+    test("the lock we write records the uptime", async () => {
+      const d = await start();
+      try {
+        expect(readLock().uptimeMs).toBeGreaterThan(0);
+      } finally {
+        await d.close();
+      }
+    });
   });
 
   test("a legacy bare-pid lock keeps the old rules", async () => {
