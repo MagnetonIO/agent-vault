@@ -186,7 +186,14 @@ importers:
 
   packages/cli: {}
 
-  packages/core: {}
+  packages/core:
+    dependencies:
+      '@agent-vault/crypto':
+        specifier: workspace:*
+        version: link:../crypto
+      '@agent-vault/platform':
+        specifier: workspace:*
+        version: link:../platform
 
   packages/crypto:
     dependencies:
