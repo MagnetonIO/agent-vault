@@ -1,4 +1,24 @@
+export {
+  AdapterError,
+  type DoctorCheck,
+  type DoctorReport,
+  type HarnessAdapter,
+  type HarnessId,
+  type HookOptions,
+  type HookOutput,
+  type InstallOptions,
+  type InstallReport,
+} from "./adapter.js";
 export { backupFile, writeFileAtomic } from "./backup.js";
+export {
+  CLAUDE_HOOK_MARKER,
+  type ClaudeCodeDeps,
+  type ClaudeRunner,
+  createClaudeCodeAdapter,
+  type ProbeRunner,
+  tagFirst,
+  versionManagerOf,
+} from "./claude-code.js";
 export {
   CHAINED_HOOK,
   checkDiff,
@@ -10,6 +30,49 @@ export {
   scanDiff,
   uninstallHook,
 } from "./guard.js";
+export {
+  EXPOSED_TAG,
+  HOOK_DEADLINE_MS,
+  type HookClient,
+  handlePromptSubmit,
+  handleScrub,
+  heldBackReason,
+  OVERSIZE_REASON,
+  type PromptDecision,
+  type PromptSubmitOptions,
+  SCRUB_TIMEOUT_MS,
+  type ScrubOptions,
+  storedReason,
+} from "./hook.js";
+export {
+  addHooks,
+  addHooksTracked,
+  type CommandMatch,
+  findHooks,
+  type HookEntry,
+  type HookSpec,
+  quoteArg,
+  quoteCommand,
+  removeHooks,
+  splitCommand,
+} from "./hook-config.js";
+export {
+  type FileState,
+  type InstallState,
+  loadState,
+  pruneFrom,
+  saveState,
+} from "./install-state.js";
+export {
+  appendAt,
+  JsonEditError,
+  type JsonPath,
+  missingContainers,
+  type PruneFn,
+  parseJson,
+  removeAt,
+  setAt,
+} from "./json-edit.js";
 export {
   type ApplyOptions,
   applyMigration,
