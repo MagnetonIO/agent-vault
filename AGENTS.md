@@ -18,6 +18,7 @@ TypeScript / Node 24 pnpm monorepo (ESM, `tsc -b` project references, Vitest, Bi
 | `pnpm test` | `vitest run` |
 | `pnpm lint` | `biome check .` |
 | `pnpm dev` | `tsx watch` the CLI daemon |
+| `pnpm dist` | `pnpm build`, then the Node SEA binary for this platform in `dist-sea/<platform>-<arch>/` |
 
 ## Conventions
 
