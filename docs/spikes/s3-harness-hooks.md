@@ -213,10 +213,19 @@ See the updated adapter table in `docs/design.md`. Items for the plan owner (the
 
 ## Commands run outside the sandbox
 
-Exactly three items. No secret was written to a real dir as far as can be told (items 2 and 3 are unattributed); they are listed so the real-dir check can be read honestly. Fix round 1 ran **no** harness command outside the sandbox (every run: `env -i`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_*` in one temp dir, under `timeout`).
+Exactly five items: 3 `opencode` invocations (each wrote one line to the real `opencode.log`) and 2 unattributed file changes. No secret was written to a real dir as far as can be told (items 4 and 5 are unattributed); they are listed so the real-dir check can be read honestly. Apart from item 3 (a single `opencode --version`, the `opencode` calls in items 1 and 2 predate this round), fix round 1 ran every harness command sandboxed (`env -i`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_*` in one temp dir, under `timeout`).
 
-1. `opencode mcp add --help` wrote 1 line to the real `~/.local/share/opencode/log/opencode.log` at 03:03:57Z (harmless).
-2. Real `~/.codex/state_5.sqlite` mtime 02:56Z falls in the spike window. Cause unattributed (a `codex app-server` daemon was running).
-3. `~/.claude.json` and `~/.codex/config.toml` changed during the window. Attributed to live sessions, unproven.
+Real `~/.local/share/opencode/log/opencode.log` holds 3 "cli starting" lines from this work, 1 log line each, harmless:
+
+| # | Time (UTC) | Args | Who |
+|---|------------|------|-----|
+| 1 | 02:58:12Z | `mcp add --help` | earlier spike implementer; was not disclosed before fix round 2 |
+| 2 | 03:03:57Z | `mcp add --help` | spike implementer |
+| 3 | 15:08:41Z | `--version` | fix round 1, run without the sandbox env |
+
+Unattributed changes (no spike command known to cause them):
+
+4. Real `~/.codex/state_5.sqlite` mtime 02:56Z falls in the spike window. Cause unattributed (a `codex app-server` daemon was running).
+5. `~/.claude.json` and `~/.codex/config.toml` changed during the window. Attributed to live sessions, unproven.
 
 Stat-only before/after check, paths sanitized to `~`: [E: real-dirs-check.txt]. `~/.claude/settings.json` and `~/.codex/history.jsonl` are unchanged (mtime and size equal).
