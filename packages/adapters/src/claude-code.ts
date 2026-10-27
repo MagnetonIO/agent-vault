@@ -15,6 +15,7 @@ import {
   type InstallReport,
 } from "./adapter.js";
 import { backupFile, writeFileAtomic } from "./backup.js";
+import { claudeConfigDir, claudeGlobalFile } from "./config-dirs.js";
 import { type HookClient, handlePromptSubmit, handleScrub } from "./hook.js";
 import {
   addHooksTracked,
@@ -33,6 +34,7 @@ import {
   removeAt,
   setAt,
 } from "./json-edit.js";
+import { wrappedServersCheck } from "./wrapped-check.js";
 
 /** What follows our command words in every hook command we write. */
 export const CLAUDE_HOOK_MARKER = " hook claude-code ";
@@ -73,7 +75,7 @@ export type ClaudeCodeDeps = {
   client: () => Promise<HookClient>;
   /** The user's home. Default `os.homedir()`. */
   home?: string | undefined;
-  /** Default `process.env`; only `CLAUDE_CONFIG_DIR` is read from it. */
+  /** Default `process.env`; `CLAUDE_CONFIG_DIR` and (for `doctor`) PATH are read from it. */
   env?: NodeJS.ProcessEnv | undefined;
   /** Default `getPaths().backupsDir`. */
   backupsDir?: string | undefined;
@@ -145,14 +147,10 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
   const homeDir = (): string => deps.home ?? os.homedir();
   const backupsDir = (): string => deps.backupsDir ?? getPaths().backupsDir;
 
-  const configDir = (home: string): string =>
-    env.CLAUDE_CONFIG_DIR ? path.resolve(env.CLAUDE_CONFIG_DIR) : path.join(home, ".claude");
+  const configDir = (home: string): string => claudeConfigDir(home, env.CLAUDE_CONFIG_DIR);
   const settingsFile = (home: string): string => path.join(configDir(home), "settings.json");
   /** Claude keeps its user-scope config (MCP servers) beside the config dir, or inside it. */
-  const globalFile = (home: string): string =>
-    env.CLAUDE_CONFIG_DIR
-      ? path.join(configDir(home), ".claude.json")
-      : path.join(home, ".claude.json");
+  const globalFile = (home: string): string => claudeGlobalFile(home, env.CLAUDE_CONFIG_DIR);
 
   const words = (...extra: string[]): string => quoteCommand([...deps.command, ...extra], platform);
   const hookSpecs = (): HookSpec[] => [
@@ -523,6 +521,10 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
         mcpOk,
         mcpOk ? `agent-vault registered in ${globalFile(home)}` : "agent-vault is not registered",
         reinstall,
+      );
+
+      checks.push(
+        wrappedServersCheck([globalFile(home)], "claude", { self: deps.command, env, platform }),
       );
 
       // probe: run the installed command line on a prompt that holds a made-up key

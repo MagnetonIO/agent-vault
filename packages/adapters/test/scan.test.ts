@@ -44,6 +44,17 @@ describe("historyFiles", () => {
     expect(found).toEqual(want);
   });
 
+  test("Claude's files are read from claudeConfigDir when it is set", () => {
+    const moved = put("moved/projects/p/t.jsonl", "{}\n");
+    const history = put("moved/history.jsonl", "{}\n");
+    put("home/.claude/projects/p/decoy.jsonl", "{}\n");
+    const found = historyFiles({
+      home: path.join(dir, "home"),
+      claudeConfigDir: path.join(dir, "moved"),
+    });
+    expect(found).toEqual([history, moved].sort());
+  });
+
   test("a machine with none of them gives an empty list", () => {
     expect(historyFiles({ home: path.join(dir, "nothing") })).toEqual([]);
   });

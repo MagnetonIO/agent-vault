@@ -761,6 +761,34 @@ describe("uninstall", () => {
 });
 
 describe("doctor", () => {
+  test("a wrapped MCP server (TOML command/args) whose node or main.js is gone is red", async () => {
+    const m = make();
+    const gone = path.join(box.dir, "old", "packages", "cli", "dist", "main.js");
+    write(
+      configFile(),
+      `[mcp_servers.search]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(gone)}, "run", "--bundle", "mcp-search", "--", "npx", "search"]\n`,
+    );
+    const check = (await m.adapter.doctor(box.home)).checks.find(
+      (c) => c.name === "wrapped MCP servers",
+    );
+    expect(check).toMatchObject({
+      ok: false,
+      detail: `search in ${configFile()} runs ${gone}, which does not exist`,
+    });
+
+    write(
+      configFile(),
+      `[mcp_servers.search]\ncommand = ${JSON.stringify(m.command[0])}\nargs = [${JSON.stringify(m.command[1])}, "run", "--bundle", "mcp-search", "--", "npx"]\n`,
+    );
+    const fine = (await m.adapter.doctor(box.home)).checks.find(
+      (c) => c.name === "wrapped MCP servers",
+    );
+    expect(fine).toMatchObject({
+      ok: true,
+      detail: "1 run through agent-vault, and each command exists",
+    });
+  });
+
   async function installed(extra: Parameters<typeof make>[0] = {}) {
     const m = make(extra);
     await m.adapter.install({ home: box.home });
@@ -835,6 +863,7 @@ describe("doctor", () => {
       "vault",
       "mcp",
       "probe",
+      "wrapped MCP servers",
       "history",
       "sqlite",
     ]);

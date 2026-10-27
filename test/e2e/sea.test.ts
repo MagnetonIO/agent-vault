@@ -43,6 +43,10 @@ describe.skipIf(!process.env.AGENT_VAULT_TEST_SEA)("SEA binary", { timeout: 120_
       XDG_RUNTIME_DIR: path.join(dir, "run"),
       AGENT_VAULT_KEYFILE_PASSPHRASE: "sea smoke passphrase 4417",
     };
+    // The developer's own harness dirs must not leak in (sandbox rule).
+    delete env.CLAUDE_CONFIG_DIR;
+    delete env.XDG_CONFIG_HOME;
+    delete env.CODEX_HOME;
   });
 
   afterAll(() => {

@@ -17,7 +17,7 @@ import { backupFile, writeFileAtomic } from "./backup.js";
 import { splitEnvLine } from "./dotenv.js";
 import { bundleBase, isLegalName, lowerDashes, NAME_MAX, sanitizeName, suffixed } from "./names.js";
 import { type Finding, type FindingKind, isRemoteHeader } from "./sources.js";
-import { parseWrapper, wrapArgv } from "./wrap.js";
+import { parseWrapper, WRAPPER, wrapArgv } from "./wrap.js";
 
 export { sanitizeName } from "./names.js";
 
@@ -38,6 +38,11 @@ export type MigrationResult = {
 export type ApplyOptions = {
   /** Defaults to `getPaths().backupsDir`. */
   backupsDir?: string | undefined;
+  /**
+   * How a wrapped server runs agent-vault: absolute words (`[node, /abs/main.js]` or the
+   * single-file binary), since agent-vault is not on PATH. Default the bare `agent-vault`.
+   */
+  command?: readonly string[] | undefined;
 };
 
 type JsonPath = (string | number)[];
@@ -143,7 +148,12 @@ function formattingOf(text: string): FormattingOptions {
 }
 
 /** Wrap each planned server of a Claude or OpenCode JSON/JSONC config. */
-function rewriteJson(text: string, kind: FindingKind, plans: ServerPlan[]): string {
+function rewriteJson(
+  text: string,
+  kind: FindingKind,
+  plans: ServerPlan[],
+  self: readonly string[],
+): string {
   const bom = text.startsWith("\uFEFF") ? "\uFEFF" : "";
   let out = bom ? text.slice(1) : text;
   const formattingOptions = formattingOf(out);
@@ -154,7 +164,7 @@ function rewriteJson(text: string, kind: FindingKind, plans: ServerPlan[]): stri
 
   for (const plan of plans) {
     const argv = argvOf(kind, read(plan.serverPath));
-    const wrapped = wrapArgv(argv, plan.bundle);
+    const wrapped = wrapArgv(argv, plan.bundle, self);
     if (wrapped !== argv) {
       if (kind === "opencode-mcp") {
         edit([...plan.serverPath, "command"], wrapped);
@@ -177,12 +187,12 @@ function rewriteJson(text: string, kind: FindingKind, plans: ServerPlan[]): stri
   return bom + out;
 }
 
-function rewriteToml(text: string, plans: ServerPlan[]): string {
+function rewriteToml(text: string, plans: ServerPlan[], self: readonly string[]): string {
   const root = parseToml(text.replace(/^\uFEFF/, ""));
   for (const plan of plans) {
     const def = getAt(root, plan.serverPath) as Record<string, unknown>;
     const argv = argvOf("codex-mcp", def);
-    const wrapped = wrapArgv(argv, plan.bundle);
+    const wrapped = wrapArgv(argv, plan.bundle, self);
     if (wrapped !== argv) {
       def.command = wrapped[0];
       def.args = wrapped.slice(1);
@@ -215,6 +225,8 @@ type Ledger = {
   /** name -> env grants, for every bundle that exists or is planned. */
   bundles: Map<string, Map<string, string>>;
   existing: Set<string>;
+  /** How a wrapped server runs agent-vault (`ApplyOptions.command`). */
+  self: readonly string[];
 };
 
 function planServers(
@@ -243,7 +255,7 @@ function planServers(
     const fits = (held: Map<string, string>) =>
       [...grants].every(([env, s]) => !held.has(env) || held.get(env) === s);
 
-    const wrapper = parseWrapper(argvOf(kind, getAt(root, serverPath)));
+    const wrapper = parseWrapper(argvOf(kind, getAt(root, serverPath)), ledger.self);
     let bundle: string;
     if (wrapper.kind === "run" && wrapper.bundle !== null) {
       bundle = wrapper.bundle;
@@ -331,7 +343,9 @@ function planFile(file: string, group: Finding[], ledger: Ledger): FilePlan {
   return {
     file,
     count: group.length,
-    rewritten: toml ? rewriteToml(text, plans) : rewriteJson(text, kind, plans),
+    rewritten: toml
+      ? rewriteToml(text, plans, ledger.self)
+      : rewriteJson(text, kind, plans, ledger.self),
     fresh,
     plans,
     reformatted: toml,
@@ -368,6 +382,7 @@ export async function applyMigration(
     byValue: new Map(),
     bundles: new Map(bundleList.map((b) => [b.name, new Map(Object.entries(b.env))])),
     existing: new Set(bundleList.map((b) => b.name)),
+    self: opts.command ?? [WRAPPER],
   };
 
   const byFile = new Map<string, Finding[]>();

@@ -22,6 +22,7 @@ import {
   tagFirst,
   versionManagerOf,
 } from "./claude-code.js";
+import { codexHomeDir } from "./config-dirs.js";
 import { type HookClient, handlePromptSubmit, handleScrub } from "./hook.js";
 import {
   appendHook,
@@ -51,6 +52,7 @@ import {
   tomlString,
   undoEdit,
 } from "./toml-edit.js";
+import { wrappedServersCheck } from "./wrapped-check.js";
 
 /** Marks our entries in `hooks.json`: install keeps or replaces them and uninstall removes them. */
 export const CODEX_HOOK_MARKER = " hook codex ";
@@ -73,7 +75,7 @@ export type CodexDeps = {
   client: () => Promise<HookClient>;
   /** The user's home. Default `os.homedir()`. */
   home?: string | undefined;
-  /** Default `process.env`; only `CODEX_HOME` is read from it. */
+  /** Default `process.env`; `CODEX_HOME` and (for `doctor`) PATH are read from it. */
   env?: NodeJS.ProcessEnv | undefined;
   /** What an install records for its uninstall. Default `<dataDir>/adapters/codex-state.json`. */
   stateFile?: string | undefined;
@@ -163,8 +165,7 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
   const stateFile = (): string =>
     deps.stateFile ?? path.join(getPaths().dataDir, "adapters", "codex-state.json");
 
-  const codexHome = (home: string): string =>
-    env.CODEX_HOME ? path.resolve(env.CODEX_HOME) : path.join(home, ".codex");
+  const codexHome = (home: string): string => codexHomeDir(home, env.CODEX_HOME);
   const hooksFile = (home: string): string => path.join(codexHome(home), "hooks.json");
   const configFile = (home: string): string => path.join(codexHome(home), "config.toml");
   const runCodex = (home: string): CodexRunner =>
@@ -897,6 +898,10 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
           );
         }
       }
+
+      checks.push(
+        wrappedServersCheck([configPath], "codex", { self: deps.command, env, platform }),
+      );
 
       // history
       const persistence = isRecord(root.history) ? root.history.persistence : undefined;

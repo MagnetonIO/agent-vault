@@ -704,16 +704,20 @@ describe("agent-vault mcp over stdio", () => {
     expect(fs.existsSync(CLI), `${CLI} is missing: run pnpm build first`).toBe(true);
     const home = path.join(dir, "vault");
     fs.mkdirSync(home, { recursive: true });
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: dir,
+      USERPROFILE: dir,
+      CODEX_HOME: dir,
+      AGENT_VAULT_HOME: home,
+      XDG_DATA_HOME: path.join(dir, "xdg-data"),
+      XDG_RUNTIME_DIR: path.join(dir, "xdg-run"),
+    };
+    // The developer's own harness dirs must not leak in (sandbox rule).
+    delete env.CLAUDE_CONFIG_DIR;
+    delete env.XDG_CONFIG_HOME;
     child = spawn(NODE, [CLI, "mcp"], {
-      env: {
-        ...process.env,
-        HOME: dir,
-        USERPROFILE: dir,
-        CODEX_HOME: dir,
-        AGENT_VAULT_HOME: home,
-        XDG_DATA_HOME: path.join(dir, "xdg-data"),
-        XDG_RUNTIME_DIR: path.join(dir, "xdg-run"),
-      },
+      env,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });

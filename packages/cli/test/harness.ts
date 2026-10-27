@@ -67,6 +67,9 @@ export function makeSandbox(keystore: "keyfile" | "os" = "keyfile"): Sandbox {
     AGENT_VAULT_KEYFILE_PASSPHRASE: PASSPHRASE,
     AGENT_VAULT_TEST_CLIPBOARD_FILE: clipboard,
   };
+  // The developer's own harness dirs must not leak in (sandbox rule); CODEX_HOME is set above.
+  delete env.CLAUDE_CONFIG_DIR;
+  delete env.XDG_CONFIG_HOME;
 
   const start: Sandbox["start"] = (args, opts = {}) => {
     const child = spawn(process.execPath, [CLI, ...args], {

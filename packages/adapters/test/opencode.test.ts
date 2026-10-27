@@ -454,6 +454,25 @@ describe("doctor", () => {
   const line = (r: Awaited<ReturnType<ReturnType<typeof make>["adapter"]["doctor"]>>, n: string) =>
     r.checks.find((c) => c.name === n);
 
+  test("a wrapped MCP server (OpenCode command array) whose binary is gone is red", async () => {
+    const { adapter } = make();
+    const gone = path.join(box.dir, "gone", "agent-vault");
+    write(
+      jsonFile(),
+      JSON.stringify({
+        mcp: {
+          f: { type: "local", command: [gone, "run", "--bundle", "mcp-f", "--", "npx", "f"] },
+          r: { type: "remote", url: "https://example.invalid" },
+        },
+      }),
+    );
+    const report = await adapter.doctor(box.home);
+    expect(line(report, "wrapped MCP servers")).toMatchObject({
+      ok: false,
+      detail: `f in ${jsonFile()} runs ${gone}, which does not exist`,
+    });
+  });
+
   test("after install: mcp, daemon and vault pass; prompt capture is informational", async () => {
     const { adapter } = make();
     await adapter.install({ home: box.home });
@@ -464,6 +483,7 @@ describe("doctor", () => {
     expect(report.ok).toBe(true);
     expect(report.checks.map((c) => c.name)).toEqual([
       "mcp",
+      "wrapped MCP servers",
       "daemon",
       "vault",
       "prompt capture",

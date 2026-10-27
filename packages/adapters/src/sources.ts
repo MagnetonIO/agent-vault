@@ -4,6 +4,12 @@ import { parseEnvFile } from "@agent-vault/core";
 import { type Detection, detectSecrets } from "@agent-vault/detect";
 import { type ParseError, parse as parseJsonc } from "jsonc-parser";
 import { parse as parseToml } from "smol-toml";
+import {
+  claudeConfigDir,
+  claudeGlobalFile,
+  codexHomeDir,
+  opencodeConfigDir,
+} from "./config-dirs.js";
 import { closingQuote, splitEnvLine } from "./dotenv.js";
 import { lowerDashes, sanitizeName } from "./names.js";
 import { parseWrapper } from "./wrap.js";
@@ -37,6 +43,10 @@ export type Sources = {
   cwd: string;
   /** `$CODEX_HOME`; `<home>/.codex` when unset. */
   codexHome?: string | undefined;
+  /** `$CLAUDE_CONFIG_DIR`; `<home>/.claude` and `<home>/.claude.json` when unset. */
+  claudeConfigDir?: string | undefined;
+  /** `$XDG_CONFIG_HOME`; OpenCode's user config is in `<it>/opencode`, else `<home>/.config/opencode`. */
+  xdgConfigHome?: string | undefined;
   /** Told about anything that was skipped or needs a person, so a miss is never silent. */
   warn?: ((message: string) => void) | undefined;
 };
@@ -267,12 +277,61 @@ function findInCodexToml(file: string, warn?: Warn): Finding[] {
 const CODEX_SHAPE: McpShape = { ...CLAUDE_SHAPE, stdioKind: "codex-mcp", isRemote: () => false };
 
 export const codexHomeOf = (s: Pick<Sources, "home" | "codexHome">): string =>
-  s.codexHome || path.join(s.home, ".codex");
+  codexHomeDir(s.home, s.codexHome);
 
 /** Where OpenCode keeps its config: the project's own file, then the user's. */
 function opencodeConfigs(s: Sources): string[] {
-  const dirs = [s.cwd, path.join(s.home, ".config", "opencode")];
+  const dirs = [s.cwd, opencodeConfigDir(s.home, s.xdgConfigHome)];
   return dirs.flatMap((d) => ["opencode.json", "opencode.jsonc"].map((n) => path.join(d, n)));
+}
+
+export type McpConfigKind = "claude" | "codex" | "opencode";
+
+/**
+ * Every stdio MCP server in one harness config file, as `[command, ...args]`; none if the file is
+ * absent or does not parse. Claude's per-project servers are included.
+ */
+export function mcpServers(
+  file: string,
+  config: McpConfigKind,
+): { server: string; argv: unknown[] }[] {
+  const text = readText(file);
+  if (text === null) return [];
+  let root: unknown;
+  if (config === "codex") {
+    try {
+      root = parseToml(text);
+    } catch {
+      return [];
+    }
+  } else {
+    const errors: ParseError[] = [];
+    root = parseJsonc(text, errors, { allowTrailingComma: true });
+    if (errors.length > 0) return [];
+  }
+  if (!isRecord(root)) return [];
+  const shape = config === "opencode" ? OPENCODE_SHAPE : CLAUDE_SHAPE;
+  const tables: unknown[] =
+    config === "codex"
+      ? [root.mcp_servers]
+      : config === "opencode"
+        ? [root.mcp]
+        : [root.mcpServers];
+  if (config === "claude" && isRecord(root.projects)) {
+    for (const project of Object.values(root.projects)) {
+      if (isRecord(project)) tables.push(project.mcpServers);
+    }
+  }
+  const out: { server: string; argv: unknown[] }[] = [];
+  for (const table of tables) {
+    if (!isRecord(table)) continue;
+    for (const [server, def] of Object.entries(table)) {
+      if (!isRecord(def) || shape.isRemote(def)) continue;
+      const argv = shape.argvOf(def);
+      if (argv.length > 0) out.push({ server, argv });
+    }
+  }
+  return out;
 }
 
 /** Every plaintext secret in the dotenv files, MCP configs and OpenCode configs. Reads only. */
@@ -291,7 +350,7 @@ export async function findPlaintextSecrets(sources: Sources): Promise<Finding[]>
   );
   out.push(
     ...findInJson(
-      path.join(home, ".claude.json"),
+      claudeGlobalFile(home, sources.claudeConfigDir),
       CLAUDE_SHAPE,
       "mcpServers",
       { projects: true },
@@ -340,13 +399,15 @@ function looksBinary(file: string): boolean {
 export type HistorySources = {
   home: string;
   codexHome?: string | undefined;
+  /** `$CLAUDE_CONFIG_DIR`; Claude's transcripts and history live under it. */
+  claudeConfigDir?: string | undefined;
   /** `$XDG_DATA_HOME`; OpenCode's data lives under it. `<home>/.local/share` is always checked. */
   xdgDataHome?: string | undefined;
 };
 
 /** Transcript and history files the harnesses keep, as text files that exist. */
 export function historyFiles(s: HistorySources): string[] {
-  const claude = path.join(s.home, ".claude");
+  const claude = claudeConfigDir(s.home, s.claudeConfigDir);
   const codex = codexHomeOf(s);
   const found: string[] = [];
 

@@ -94,9 +94,10 @@ describe("migrate, import", { timeout: TIMEOUT_MS }, () => {
       /^NODE_ENV=test\nGITHUB_TOKEN=vault:\/\/github\/pat-\d{8}\n$/,
     );
     const server = JSON.parse(fs.readFileSync(claude, "utf8")).mcpServers.git;
+    // Wrapped with the absolute words of this CLI: agent-vault itself is not on PATH.
     expect(server).toEqual({
-      command: "agent-vault",
-      args: ["run", "--bundle", "mcp-git", "--", "npx"],
+      command: process.execPath,
+      args: [fs.realpathSync(CLI), "run", "--bundle", "mcp-git", "--", "npx"],
     });
 
     const list = await sb.cli(["list"]);
@@ -198,6 +199,56 @@ describe("scan", { timeout: TIMEOUT_MS }, () => {
     expect(json.stdout).not.toContain(PAT);
     // no daemon was needed
     expect(await sb.daemonPid()).toBeNull();
+  });
+});
+
+describe("CLAUDE_CONFIG_DIR and XDG_CONFIG_HOME move what migrate and scan read", {
+  timeout: TIMEOUT_MS,
+}, () => {
+  const sb = sandbox();
+  const moved = path.join(sb.dir, "moved-claude");
+  const xdg = path.join(sb.dir, "xdg-config");
+  const env = { CLAUDE_CONFIG_DIR: moved, XDG_CONFIG_HOME: xdg };
+
+  test("migrate finds MCP secrets in $CLAUDE_CONFIG_DIR/.claude.json and $XDG_CONFIG_HOME/opencode", async () => {
+    put(
+      path.join(moved, ".claude.json"),
+      JSON.stringify({ mcpServers: { git: { command: "npx", env: { A_TOKEN: fakes.openai() } } } }),
+    );
+    put(
+      path.join(xdg, "opencode", "opencode.json"),
+      JSON.stringify({
+        mcp: { f: { type: "local", command: ["npx"], environment: { B_TOKEN: fakes.slack() } } },
+      }),
+    );
+    // Decoys where the defaults would look: not read while the variables are set.
+    put(
+      path.join(sb.dir, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { d: { command: "npx", env: { C_TOKEN: fakes.anthropic() } } },
+      }),
+    );
+    const res = await sb.cli(["migrate", "--json"], { env });
+    expect(res.code, res.stderr).toBe(0);
+    const out = JSON.parse(res.stdout) as { findings: { file: string; envName: string }[] };
+    expect(out.findings.map((f) => [f.file, f.envName])).toEqual([
+      [path.join(moved, ".claude.json"), "A_TOKEN"],
+      [path.join(xdg, "opencode", "opencode.json"), "B_TOKEN"],
+    ]);
+  });
+
+  test("scan reads transcripts under $CLAUDE_CONFIG_DIR", async () => {
+    const PAT = fakes.githubPat();
+    const transcript = put(
+      path.join(moved, "projects", "p", "s.jsonl"),
+      `${JSON.stringify({ text: `GITHUB_TOKEN=${PAT}` })}\n`,
+    );
+    const res = await sb.cli(["scan", "--json"], { env });
+    expect(res.code).toBe(1);
+    expect(
+      (JSON.parse(res.stdout) as { hits: { file: string }[] }).hits.map((h) => h.file),
+    ).toEqual([transcript]);
+    expect(res.stdout).not.toContain(PAT);
   });
 });
 

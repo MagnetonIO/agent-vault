@@ -11,6 +11,7 @@ import {
   type InstallReport,
 } from "./adapter.js";
 import { backupFile, writeFileAtomic } from "./backup.js";
+import { opencodeConfigDir } from "./config-dirs.js";
 import type { HookClient } from "./hook.js";
 import { type FileState, loadState, pruneFrom, saveState } from "./install-state.js";
 import {
@@ -21,6 +22,7 @@ import {
   removeAt,
   setAt,
 } from "./json-edit.js";
+import { wrappedServersCheck } from "./wrapped-check.js";
 
 /** What a new `opencode.json` starts with. */
 export const OPENCODE_SCHEMA = "https://opencode.ai/config.json";
@@ -38,7 +40,9 @@ export type OpenCodeDeps = {
   client: () => Promise<HookClient>;
   /** For one-line notices on stderr (uninstall leaving an entry alone). */
   log?: ((message: string) => void) | undefined;
-  /** Default `process.env`; only `XDG_CONFIG_HOME` is read from it. */
+  /** For quoting a command in `doctor`'s fix. Default `process.platform`. */
+  platform?: NodeJS.Platform | undefined;
+  /** Default `process.env`; `XDG_CONFIG_HOME` and (for `doctor`) PATH are read from it. */
   env?: NodeJS.ProcessEnv | undefined;
   /** Default `getPaths().backupsDir`. */
   backupsDir?: string | undefined;
@@ -61,13 +65,7 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
   const stateFile = (): string =>
     deps.stateFile ?? path.join(getPaths().dataDir, "adapters", "opencode-state.json");
 
-  /** `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode` (on every OS, as OpenCode does). */
-  const configDir = (home: string): string => {
-    const xdg = env.XDG_CONFIG_HOME;
-    return xdg && path.isAbsolute(xdg)
-      ? path.join(xdg, "opencode")
-      : path.join(home, ".config", "opencode");
-  };
+  const configDir = (home: string): string => opencodeConfigDir(home, env.XDG_CONFIG_HOME);
   const jsonFile = (home: string): string => path.join(configDir(home), "opencode.json");
   const jsoncFile = (home: string): string => path.join(configDir(home), "opencode.jsonc");
   /** The config files that exist, `.json` first. */
@@ -282,6 +280,14 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
       } catch (err) {
         add("mcp", false, (err as Error).message, reinstall);
       }
+
+      checks.push(
+        wrappedServersCheck(existing(home), "opencode", {
+          self: deps.command,
+          env,
+          platform: deps.platform ?? process.platform,
+        }),
+      );
 
       // daemon and vault
       let client: HookClient | undefined;

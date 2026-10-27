@@ -13,6 +13,7 @@ export function scanCommand(program: Command): void {
       const files = historyFiles({
         home: os.homedir(),
         ...(process.env.CODEX_HOME && { codexHome: process.env.CODEX_HOME }),
+        ...(process.env.CLAUDE_CONFIG_DIR && { claudeConfigDir: process.env.CLAUDE_CONFIG_DIR }),
         ...(process.env.XDG_DATA_HOME && { xdgDataHome: process.env.XDG_DATA_HOME }),
       });
       const hits = await scanHistory(files, { warn });

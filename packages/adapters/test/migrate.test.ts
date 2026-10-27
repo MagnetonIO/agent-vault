@@ -10,6 +10,7 @@ import {
   backupFile,
   type Finding,
   findPlaintextSecrets,
+  parseWrapper,
   sanitizeName,
   wrapArgv,
 } from "../src/index.js";
@@ -630,6 +631,133 @@ describe("project-scoped and already-wrapped servers", () => {
     const once = wrapArgv(["npx", "-y", "p"], "mcp-p");
     expect(once).toEqual(["agent-vault", "run", "--bundle", "mcp-p", "--", "npx", "-y", "p"]);
     expect(wrapArgv(once, "other")).toBe(once);
+  });
+
+  test("parseWrapper knows the bare name, the single-file binary, node + main.js and the exact self words", () => {
+    const self = ["/opt/node/bin/node", "/srv/av/packages/cli/dist/main.js"];
+    const forms: [string[], number][] = [
+      [["agent-vault"], 1],
+      [["/usr/local/bin/agent-vault"], 1],
+      [["C:\\Tools\\agent-vault.exe"], 1],
+      [["/usr/bin/node", "/home/u/av/packages/cli/dist/main.js"], 2],
+      [["C:\\node\\node.exe", "C:\\av\\node_modules\\@agent-vault\\cli\\dist\\main.js"], 2],
+      [self, 2],
+    ];
+    for (const [prefix, words] of forms) {
+      expect(parseWrapper([...prefix, "run", "-b", "b", "--", "x"], self)).toEqual({
+        kind: "run",
+        bundle: "b",
+        words,
+      });
+      expect(parseWrapper([...prefix, "mcp"], self)).toEqual({ kind: "mcp", words });
+      // Wrapping again leaves it, or only adds the missing bundle after the prefix.
+      const named = [...prefix, "run", "--bundle", "b", "--", "x"];
+      expect(wrapArgv(named, "other", self)).toBe(named);
+      expect(wrapArgv([...prefix, "run", "--", "x"], "b2", self)).toEqual([
+        ...prefix,
+        "run",
+        "--bundle",
+        "b2",
+        "--",
+        "x",
+      ]);
+    }
+    // Some other node script, or a binary merely called like ours, is not agent-vault.
+    expect(parseWrapper(["node", "/srv/server/main.js", "run"])).toEqual({ kind: "none" });
+    expect(parseWrapper(["agent-vault-helper", "run"])).toEqual({ kind: "none" });
+  });
+
+  test("with absolute command words, every config shape is wrapped with them, and re-migration does not wrap twice", async () => {
+    const self = [
+      process.execPath,
+      path.join(box.home, "av", "packages", "cli", "dist", "main.js"),
+    ];
+    const claude = write(
+      path.join(box.home, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { gh: { command: "npx", args: ["-y", "gh"], env: { A_TOKEN: PAT } } },
+      }),
+    );
+    const codex = write(
+      path.join(box.codexHome, "config.toml"),
+      `[mcp_servers.search]\ncommand = "npx"\nargs = ["-y", "search"]\n\n[mcp_servers.search.env]\nB_TOKEN = "${OPENAI}"\n`,
+    );
+    const opencode = write(
+      path.join(box.home, ".config", "opencode", "opencode.json"),
+      JSON.stringify({
+        mcp: { f: { type: "local", command: ["npx", "-y", "f"], environment: { C_TOKEN: SLACK } } },
+      }),
+    );
+    type TomlServer = { command: string; args: string[] };
+    const codexServer = (): TomlServer =>
+      (parseToml(read(codex)) as { mcp_servers: Record<string, TomlServer> }).mcp_servers
+        .search as TomlServer;
+    const run = (bundle: string, ...rest: string[]) => [
+      ...self,
+      "run",
+      "--bundle",
+      bundle,
+      "--",
+      ...rest,
+    ];
+    await applyMigration(await find(), box.client, {
+      backupsDir: box.paths.backupsDir,
+      command: self,
+    });
+
+    const gh = JSON.parse(read(claude)).mcpServers.gh;
+    expect([gh.command, ...gh.args]).toEqual(run("mcp-gh", "npx", "-y", "gh"));
+    const search = codexServer();
+    expect([search.command, ...search.args]).toEqual(run("mcp-search", "npx", "-y", "search"));
+    expect(JSON.parse(read(opencode)).mcp.f.command).toEqual(run("mcp-f", "npx", "-y", "f"));
+
+    // A new plaintext secret on each wrapped server: migrated into the same bundle, never re-wrapped.
+    const ghDef = JSON.parse(read(claude));
+    ghDef.mcpServers.gh.env = { D_TOKEN: ANTHROPIC };
+    write(claude, JSON.stringify(ghDef));
+    const oc = JSON.parse(read(opencode));
+    oc.mcp.f.environment = { E_TOKEN: FINE };
+    write(opencode, JSON.stringify(oc));
+    write(codex, `${read(codex)}\n[mcp_servers.search.env]\nF_TOKEN = "${fakes.awsAkid()}"\n`);
+    const again = await find();
+    expect(again).toHaveLength(3);
+    await applyMigration(again, box.client, { backupsDir: box.paths.backupsDir, command: self });
+    const gh2 = JSON.parse(read(claude)).mcpServers.gh;
+    expect([gh2.command, ...gh2.args]).toEqual(run("mcp-gh", "npx", "-y", "gh"));
+    const search2 = codexServer();
+    expect([search2.command, ...search2.args]).toEqual(run("mcp-search", "npx", "-y", "search"));
+    expect(JSON.parse(read(opencode)).mcp.f.command).toEqual(run("mcp-f", "npx", "-y", "f"));
+    expect((await bundles()).map((b) => [b.name, Object.keys(b.env).sort()]).sort()).toEqual([
+      ["mcp-f", ["C_TOKEN", "E_TOKEN"]],
+      ["mcp-gh", ["A_TOKEN", "D_TOKEN"]],
+      ["mcp-search", ["B_TOKEN", "F_TOKEN"]],
+    ]);
+  });
+
+  test("claudeConfigDir and xdgConfigHome move the Claude and OpenCode user configs", async () => {
+    const claude = write(
+      path.join(box.dir, "moved", ".claude.json"),
+      JSON.stringify({ mcpServers: { a: { command: "x", env: { A_TOKEN: PAT } } } }),
+    );
+    const opencode = write(
+      path.join(box.dir, "xdg", "opencode", "opencode.jsonc"),
+      JSON.stringify({
+        mcp: { b: { type: "local", command: ["y"], environment: { B_TOKEN: OPENAI } } },
+      }),
+    );
+    write(
+      path.join(box.home, ".claude.json"),
+      JSON.stringify({ mcpServers: { decoy: { command: "x", env: { C_TOKEN: SLACK } } } }),
+    );
+    const findings = await findPlaintextSecrets({
+      ...sources(),
+      claudeConfigDir: path.join(box.dir, "moved"),
+      xdgConfigHome: path.join(box.dir, "xdg"),
+    });
+    expect(findings.map((f) => [f.file, f.envName])).toEqual([
+      [claude, "A_TOKEN"],
+      [opencode, "B_TOKEN"],
+    ]);
   });
 
   test("a byte order mark is read through, and kept", async () => {

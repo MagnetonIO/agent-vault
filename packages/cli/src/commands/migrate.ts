@@ -14,6 +14,7 @@ import { fingerprint } from "@agent-vault/detect";
 import type { Command } from "commander";
 import { withDaemon } from "../context.js";
 import { CliError } from "../errors.js";
+import { selfCommand } from "../harness.js";
 import { say, table } from "../output.js";
 
 const KINDS: FindingKind[] = [
@@ -49,9 +50,16 @@ async function report(findings: Finding[], warnings: string[], opts: Options): P
   const actionable = findings.filter((f) => !isRemoteHeader(f.kind));
   let applied: MigrationResult | undefined;
   if (opts.apply && findings.length > 0) {
+    // A wrapped MCP server runs agent-vault by absolute path: it is not on the harness's PATH.
+    const command = selfCommand();
+    if (actionable.some((f) => f.kind !== "dotenv") && !path.isAbsolute(command[0] ?? "")) {
+      throw new CliError(
+        "cannot tell where agent-vault is installed: run the built CLI (pnpm build) or the single-file binary",
+      );
+    }
     applied =
       actionable.length > 0
-        ? await withDaemon((client) => applyMigration(findings, client))
+        ? await withDaemon((client) => applyMigration(findings, client, { command }))
         : { migrated: 0, listedForPhase2: findings.length, backups: [], reformatted: [] };
   }
 
@@ -123,6 +131,8 @@ const sources = (warnings: string[]) => ({
   home: os.homedir(),
   cwd: process.cwd(),
   ...(process.env.CODEX_HOME && { codexHome: process.env.CODEX_HOME }),
+  ...(process.env.CLAUDE_CONFIG_DIR && { claudeConfigDir: process.env.CLAUDE_CONFIG_DIR }),
+  ...(process.env.XDG_CONFIG_HOME && { xdgConfigHome: process.env.XDG_CONFIG_HOME }),
   warn: (message: string) => void warnings.push(message),
 });
 

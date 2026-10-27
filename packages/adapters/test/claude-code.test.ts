@@ -746,6 +746,50 @@ describe("install and uninstall", () => {
 });
 
 describe("doctor", () => {
+  test("a wrapped MCP server whose command is gone is red, with the words to use instead", async () => {
+    const m = make();
+    const nowhere = path.join(box.dir, "gone", "agent-vault");
+    write(
+      globalFile(),
+      JSON.stringify({
+        mcpServers: { ok: { command: "npx", args: ["-y", "x"] } },
+        projects: {
+          "/p": {
+            mcpServers: { gh: { command: nowhere, args: ["run", "-b", "b", "--", "npx", "gh"] } },
+          },
+        },
+      }),
+    );
+    const check = (await m.adapter.doctor(box.home)).checks.find(
+      (c) => c.name === "wrapped MCP servers",
+    );
+    expect(check).toMatchObject({
+      ok: false,
+      detail: `gh in ${globalFile()} runs ${nowhere}, which does not exist`,
+    });
+    expect(check?.fix).toContain(m.command[1]);
+
+    // The bare name is red too when it is not on PATH (it never is: the packages are private).
+    write(
+      globalFile(),
+      JSON.stringify({ mcpServers: { gh: { command: "agent-vault", args: ["run", "--", "gh"] } } }),
+    );
+    const bare = (await m.adapter.doctor(box.home)).checks.find(
+      (c) => c.name === "wrapped MCP servers",
+    );
+    expect(bare).toMatchObject({
+      ok: false,
+      detail: expect.stringContaining("runs agent-vault, which does not exist"),
+    });
+
+    // No wrapped server at all: green.
+    write(globalFile(), JSON.stringify({ mcpServers: { ok: { command: "npx" } } }));
+    const none = (await m.adapter.doctor(box.home)).checks.find(
+      (c) => c.name === "wrapped MCP servers",
+    );
+    expect(none).toMatchObject({ ok: true, detail: "none" });
+  });
+
   test("reports every check green in a sandbox", async () => {
     const m = make();
     await m.adapter.install({ home: box.home });
@@ -755,6 +799,7 @@ describe("doctor", () => {
       ["daemon", true],
       ["vault", true],
       ["mcp", true],
+      ["wrapped MCP servers", true],
       ["probe", true],
       ["apiKeyHelper", true],
     ]);
