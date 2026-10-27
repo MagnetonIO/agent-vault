@@ -17,17 +17,37 @@ import {
 import { backupFile, writeFileAtomic } from "./backup.js";
 import { type HookClient, handlePromptSubmit, handleScrub } from "./hook.js";
 import {
-  addHooks,
+  addHooksTracked,
   findHooks,
   type HookSpec,
   quoteCommand,
   removeHooks,
   splitCommand,
 } from "./hook-config.js";
-import { JsonEditError, parseJson, removeAt, setAt } from "./json-edit.js";
+import { type FileState, loadState, pruneFrom, saveState } from "./install-state.js";
+import {
+  JsonEditError,
+  type JsonPath,
+  missingContainers,
+  parseJson,
+  removeAt,
+  setAt,
+} from "./json-edit.js";
 
-/** Marks our entries in `settings.json`: install replaces them and uninstall removes them. */
+/** What follows our command words in every hook command we write. */
 export const CLAUDE_HOOK_MARKER = " hook claude-code ";
+
+/**
+ * Directories a version manager keeps its Node versions in. A hook that runs `node` from there
+ * stops working, silently, when that version is removed.
+ */
+const VERSION_MANAGER_RE =
+  /[\\/](\.?fnm|fnm_multishells|\.?nvm|\.asdf|\.volta|\.nodenv|\.?mise|Cellar)[\\/]/i;
+
+/** The version manager whose directory holds `file`, if any. */
+export function versionManagerOf(file: string): string | undefined {
+  return VERSION_MANAGER_RE.exec(file)?.[1]?.replace(/^\./, "");
+}
 const MCP_NAME = "agent-vault";
 const PROMPT_TIMEOUT_S = 30;
 const SCRUB_TIMEOUT_S = 15;
@@ -57,6 +77,10 @@ export type ClaudeCodeDeps = {
   env?: NodeJS.ProcessEnv | undefined;
   /** Default `getPaths().backupsDir`. */
   backupsDir?: string | undefined;
+  /** What an install records for its uninstall. Default `<dataDir>/adapters/claude-code-state.json`. */
+  stateFile?: string | undefined;
+  /** Overall deadline of the prompt hook; see `HOOK_DEADLINE_MS`. */
+  deadlineMs?: number | undefined;
   /** Default: spawn `claude` from PATH. Tests inject one: they must never run the real binary. */
   runClaude?: ClaudeRunner | undefined;
   /** Default: spawn the command in a shell. */
@@ -149,11 +173,29 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
     },
   ];
   const helperCommand = (secret: string): string => words("helper", secret);
-  /** What `apiKeyHelper` looks like when agent-vault wrote it, wherever the binary was then. */
-  const isOurHelper = (value: unknown): boolean =>
+  /** The command words this adapter writes now, quoted. */
+  const prefix = (): string => quoteCommand(deps.command, platform);
+  const stateFile = (): string =>
+    deps.stateFile ?? path.join(getPaths().dataDir, "adapters", "claude-code-state.json");
+  /**
+   * Entries are ours only if they start with the command words an install wrote: the ones it
+   * would write now, or the ones it recorded (the binary may have moved since). A command that
+   * merely mentions `hook claude-code`, or a foreign `node ... helper prod`, is not.
+   */
+  const prefixesOf = (recorded: FileState | undefined): string[] => [
+    ...new Set([prefix(), ...(recorded ? [recorded.prefix] : [])]),
+  ];
+  const isOurHook =
+    (prefixes: string[]) =>
+    (command: string): boolean =>
+      prefixes.some((p) => command.startsWith(`${p}${CLAUDE_HOOK_MARKER}`));
+  const isOurHelper = (value: unknown, prefixes: string[]): boolean =>
     typeof value === "string" &&
-    (value.startsWith(`${quoteCommand(deps.command, platform)} helper `) ||
-      /(?:agent-vault(?:\.exe)?|main\.js)['"]? helper [a-z0-9][a-z0-9._/-]*$/.test(value));
+    prefixes.some(
+      (p) =>
+        value.startsWith(`${p} helper `) &&
+        /^[a-z0-9][a-z0-9._/-]*$/.test(value.slice(p.length + 8)),
+    );
   const mcpEntry = (): { type: string; command: string; args: string[] } => ({
     type: "stdio",
     command: deps.command[0] as string,
@@ -187,6 +229,29 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, text, { mode: 0o600 });
     }
+  };
+
+  /** What to record about a file we are about to change. */
+  const stateFor = (
+    text: string | null,
+    previous: FileState | undefined,
+    created: JsonPath[],
+  ): FileState => {
+    const whitespace = text !== null && text.trim() === "" ? text : previous?.whitespace;
+    return {
+      createdFile: text === null || (previous?.createdFile ?? false),
+      ...(whitespace !== undefined && { whitespace }),
+      created,
+      prefix: prefix(),
+    };
+  };
+
+  /** Save `next` over `file`, or take the file away if we made it and nothing else is in it. */
+  const finish = (file: string, next: string, recorded: FileState | undefined): void => {
+    const bare = Object.keys(parseJson(next)).length === 0;
+    if (bare && recorded?.createdFile) fs.rmSync(file, { force: true });
+    else if (bare && recorded?.whitespace !== undefined) writeFileAtomic(file, recorded.whitespace);
+    else writeFileAtomic(file, next);
   };
 
   const mcpOf = (root: Record<string, unknown>): Record<string, unknown> | undefined => {
@@ -244,21 +309,53 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
       const global = globalFile(home);
       const globalText = read(global);
       const globalRoot = parsed(global, globalText);
+      const state = loadState(stateFile());
+      const prevSettings = state.files[settings];
+      const prevGlobal = state.files[global];
+      const prefixes = prefixesOf(prevSettings);
       if (
         modelKey !== undefined &&
         settingsRoot.apiKeyHelper !== undefined &&
-        !isOurHelper(settingsRoot.apiKeyHelper)
+        !isOurHelper(settingsRoot.apiKeyHelper, prefixes)
       ) {
         throw new AdapterError(
           `${settings} already sets apiKeyHelper to something else; remove it first, then retry`,
         );
       }
 
-      const report: InstallReport = { harness: "claude-code", files: [], backups: [], notes: [] };
+      const report: InstallReport = {
+        harness: "claude-code",
+        files: [],
+        backups: [],
+        notes: [],
+        warnings: [],
+      };
+      const manager = versionManagerOf(deps.command[0] as string);
+      if (manager) {
+        report.warnings?.push(
+          `the hooks run ${deps.command[0]}, which belongs to ${manager}: removing or switching that Node version silently disables prompt capture. Run \`agent-vault doctor claude-code\` after upgrading Node, or install the single-file binary.`,
+        );
+      }
 
-      let next = addHooks(settingsText ?? "", hookSpecs(), CLAUDE_HOOK_MARKER);
+      const { text: hooked, created } = addHooksTracked(
+        settingsText ?? "",
+        hookSpecs(),
+        isOurHook(prefixes),
+        pruneFrom(prevSettings),
+      );
+      let next = hooked;
       if (modelKey !== undefined) next = setAt(next, ["apiKeyHelper"], helperCommand(modelKey));
+      // Containers a previous install made and the user has since filled stay recorded.
+      for (const path of prevSettings?.created ?? []) {
+        if (
+          missingContainers(next, path).length === 0 &&
+          !created.some((c) => c.join("\0") === path.join("\0"))
+        ) {
+          created.push(path);
+        }
+      }
       write(settings, next, report.backups, settingsText !== null);
+      state.files[settings] = stateFor(settingsText, prevSettings, created);
       report.files.push(settings);
       report.notes.push("hooks: UserPromptSubmit, SessionEnd, SessionStart");
       if (modelKey !== undefined)
@@ -267,6 +364,7 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
       const existing = mcpOf(globalRoot);
       if (existing && sameMcp(existing)) {
         report.notes.push("MCP server agent-vault was already registered");
+        saveState(stateFile(), state);
         return report;
       }
       if (globalText !== null) report.backups.push(backupFile(global, backupsDir()));
@@ -285,32 +383,44 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
         viaCli = run.code === 0;
       }
       if (viaCli) {
+        state.files[global] = stateFor(globalText ?? "{}", prevGlobal, []);
         report.notes.push("MCP server agent-vault added with `claude mcp add --scope user`");
       } else {
         // No `claude` on PATH, or it failed: write the entry it would have written.
         const text = setAt(globalText ?? "", ["mcpServers", MCP_NAME], mcpEntry());
         if (globalText !== null) writeFileAtomic(global, text);
         else write(global, text, report.backups, false);
+        state.files[global] = stateFor(
+          globalText,
+          prevGlobal,
+          globalRoot.mcpServers === undefined ? [["mcpServers"]] : (prevGlobal?.created ?? []),
+        );
         report.notes.push(`MCP server agent-vault written to ${global}`);
       }
       report.files.push(global);
+      saveState(stateFile(), state);
       return report;
     },
 
     async uninstall(home) {
+      const state = loadState(stateFile());
       const settings = settingsFile(home);
+      const recordedSettings = state.files[settings];
       const settingsText = read(settings);
       if (settingsText !== null) {
         const root = parsed(settings, settingsText);
-        let next = removeHooks(settingsText, CLAUDE_HOOK_MARKER);
-        if (isOurHelper(root.apiKeyHelper)) next = removeAt(next, ["apiKeyHelper"]);
+        const prefixes = prefixesOf(recordedSettings);
+        let next = removeHooks(settingsText, isOurHook(prefixes), pruneFrom(recordedSettings));
+        if (isOurHelper(root.apiKeyHelper, prefixes)) next = removeAt(next, ["apiKeyHelper"]);
         if (next !== settingsText) {
           backupFile(settings, backupsDir());
-          writeFileAtomic(settings, next);
+          finish(settings, next, recordedSettings);
         }
       }
+      delete state.files[settings];
 
       const global = globalFile(home);
+      const recordedGlobal = state.files[global];
       const globalText = read(global);
       if (globalText !== null && mcpOf(parsed(global, globalText))) {
         backupFile(global, backupsDir());
@@ -318,9 +428,15 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
         // The command may be absent, or may have failed; whatever it left is removed here.
         const after = read(global);
         if (after !== null && mcpOf(parsed(global, after))) {
-          writeFileAtomic(global, removeAt(after, ["mcpServers", MCP_NAME]));
+          finish(
+            global,
+            removeAt(after, ["mcpServers", MCP_NAME], pruneFrom(recordedGlobal)),
+            recordedGlobal,
+          );
         }
       }
+      delete state.files[global];
+      saveState(stateFile(), state);
     },
 
     async doctor(home): Promise<DoctorReport> {
@@ -341,7 +457,8 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
       }
 
       // hooks
-      const found = settingsText === null ? [] : findHooks(settingsText, CLAUDE_HOOK_MARKER);
+      const prefixes = prefixesOf(loadState(stateFile()).files[settings]);
+      const found = settingsText === null ? [] : findHooks(settingsText, isOurHook(prefixes));
       const has = (event: string, event2: string): { event: string; command: string } | undefined =>
         found.find((h) => h.event === event && h.command.endsWith(` ${event2}`));
       const prompt = has("UserPromptSubmit", "prompt-submit");
@@ -365,6 +482,12 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
           add("hooks", false, `the hook runs ${gone[0]}, which does not exist`, reinstall);
         } else {
           add("hooks", true, `3 hook entries in ${settings}`);
+          const node = splitCommand(found[0]?.command ?? "")[0] ?? "";
+          const manager = versionManagerOf(node);
+          if (manager) {
+            const last = checks[checks.length - 1] as DoctorCheck;
+            last.warning = `the hooks run ${node}, which belongs to ${manager}: if that Node version is removed, prompt capture stops without any message`;
+          }
         }
       }
 
@@ -435,7 +558,8 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
       // apiKeyHelper
       const helper = root.apiKeyHelper;
       if (helper === undefined) add("apiKeyHelper", true, "not set");
-      else if (!isOurHelper(helper)) add("apiKeyHelper", true, "set to a helper that is not ours");
+      else if (!isOurHelper(helper, prefixes))
+        add("apiKeyHelper", true, "set to a helper that is not ours");
       else {
         const gone = splitCommand(String(helper)).filter(
           (w) => path.isAbsolute(w) && !fs.existsSync(w),
@@ -464,10 +588,13 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
         historyFiles: adapter.historyFiles(homeDir(), input),
         client: deps.client,
         probe: opts?.probe,
+        deadlineMs: deps.deadlineMs,
         log,
       });
       return decision.block ? blockOutput(decision.reason) : null;
     },
+
+    blockOutput,
 
     historyFiles(home, input) {
       const transcript = isRecord(input) ? str(input.transcript_path) : undefined;

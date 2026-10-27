@@ -15,6 +15,7 @@ export function doctorCommand(program: Command): void {
       for (const c of report.checks) {
         say(`${c.ok ? "ok  " : "FAIL"}  ${c.name.padEnd(width)}  ${c.detail}`);
         if (!c.ok && c.fix) say(`      fix: ${c.fix}`);
+        if (c.warning) say(`      WARNING: ${c.warning}`);
       }
       const bad = report.checks.filter((c) => !c.ok).length;
       say(
