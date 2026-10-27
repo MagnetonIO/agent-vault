@@ -62,10 +62,13 @@ const NAME_RE = /^[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*$/;
 const NAME_MAX = 128;
 const DEFAULT_TYPE = "generic";
 
-function assertName(name: string): void {
-  if (typeof name !== "string" || name.length > NAME_MAX || !NAME_RE.test(name)) {
-    throw new InvalidNameError(String(name));
-  }
+/** True if `name` is a legal secret (and bundle) name. */
+export function isValidName(name: unknown): name is string {
+  return typeof name === "string" && name.length <= NAME_MAX && NAME_RE.test(name);
+}
+
+export function assertName(name: string): void {
+  if (!isValidName(name)) throw new InvalidNameError(String(name));
 }
 
 function dkAad(vaultId: string, field: "dk_device" | "dk_recovery"): Uint8Array {
@@ -83,7 +86,7 @@ function valueAad(vaultId: string, row: Pick<SecretRow, "id" | "version">): Uint
 }
 
 /** Each part as u32 BE length + UTF-8 bytes, so no two field lists encode alike. */
-function lengthPrefixed(parts: string[]): Uint8Array {
+export function lengthPrefixed(parts: string[]): Uint8Array {
   const enc = new TextEncoder();
   const bytes = parts.map((p) => enc.encode(p));
   const out = new Uint8Array(bytes.reduce((n, b) => n + 4 + b.length, 0));
@@ -162,12 +165,32 @@ function openExisting(paths: VaultPaths): { db: Db; meta: MetaRow } {
   }
 }
 
+/**
+ * Key to the vault's internals. Deliberately not re-exported from `index.ts`: bundles and the
+ * audit log live in this package and need the db and keys, but no outside caller should.
+ */
+export const INTERNALS = Symbol("agent-vault.internals");
+
+/** What bundles.ts and audit.ts need. The key arrays are the vault's own, so `close()` zeroes them. */
+export type VaultInternals = {
+  db: Db;
+  vaultId: string;
+  macKey: Uint8Array;
+  auditKey: Uint8Array;
+};
+
+/** The vault's db and keys for sibling modules. Throws VaultClosedError on a closed vault. */
+export function vaultInternals(v: Vault): VaultInternals {
+  return v[INTERNALS]();
+}
+
 /** The encrypted vault. Obtain one from `initVault`, `openVault` or `recoverVault`. */
 export class Vault {
   readonly vaultId: string;
   #db: Db;
   #dk: Uint8Array;
   #macKey: Uint8Array;
+  #auditKey: Uint8Array;
   #closed = false;
 
   /** @internal Use `initVault`, `openVault` or `recoverVault`. Takes ownership of `dk`. */
@@ -176,6 +199,18 @@ export class Vault {
     this.vaultId = vaultId;
     this.#dk = dk;
     this.#macKey = deriveSubkey(dk, "mac");
+    this.#auditKey = deriveSubkey(dk, "audit");
+  }
+
+  /** @internal Use `vaultInternals`. */
+  [INTERNALS](): VaultInternals {
+    this.#assertOpen();
+    return {
+      db: this.#db,
+      vaultId: this.vaultId,
+      macKey: this.#macKey,
+      auditKey: this.#auditKey,
+    };
   }
 
   #assertOpen(): void {
@@ -328,6 +363,7 @@ export class Vault {
     this.#closed = true;
     this.#dk.fill(0);
     this.#macKey.fill(0);
+    this.#auditKey.fill(0);
     checkpointWal(this.#db);
     this.#db.close();
   }
