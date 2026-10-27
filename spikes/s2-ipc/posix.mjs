@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { ev, run, section, sleep, tryListen } from "./lib.mjs";
+import { dirsFor, ensurePrivateDir, resolveSocket, SOCKET_MAX_BYTES } from "./paths.mjs";
 
 if (process.platform === "win32") throw new Error("posix.mjs is POSIX only");
 
@@ -214,6 +215,104 @@ section("peer credentials in pure Node");
   );
   client.destroy();
   server.close();
+}
+
+// ---- where the socket lives: runtimeDir rules + the byte-length fallback -------------------
+section("socket dir resolution (paths.mjs)");
+{
+  const tag = `/tmp/avp-${process.pid}`;
+  const cleanup = [];
+  const check = async (id, opts) => {
+    const r = resolveSocket(opts);
+    ensurePrivateDir(r.dir);
+    const s = net.createServer();
+    const l = await tryListen(s, r.path);
+    const st = fs.statSync(r.dir);
+    ev(
+      id,
+      `path=${r.path} bytes=${Buffer.byteLength(r.path)} fallback=${r.fallback} listen=${l.ok ? "ok" : `${l.code}`} dirMode=${octal(st.mode)} dirUid==me:${st.uid === process.getuid()}`,
+    );
+    if (!l.ok || (st.mode & 0o077) !== 0) failures.push(id);
+    s.close();
+    return r;
+  };
+  const mk = (n) => {
+    const d = `${tag}-${n}`;
+    fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+    cleanup.push(d);
+    return d;
+  };
+
+  const xdg = mk("xdg");
+  await check("path-linux-xdg-set", {
+    platform: "linux",
+    home: mk("h1"),
+    env: { XDG_RUNTIME_DIR: xdg },
+  });
+  await check("path-linux-xdg-unset", { platform: "linux", home: mk("h2"), env: {} });
+  await check("path-darwin-style", { platform: "darwin", home: mk("h3"), env: {} });
+  ev(
+    "path-darwin-real-home-length",
+    `${Buffer.byteLength(resolveSocket({ platform: "darwin", home: os.homedir(), env: {} }).path)} bytes for this runner's real HOME ${os.homedir()} (limit ${SOCKET_MAX_BYTES.darwin})`,
+  );
+
+  const longHome = path.join(mk("h4"), "x".repeat(100));
+  const fb = await check("path-fallback-long-home-darwin", {
+    platform: "darwin",
+    home: longHome,
+    env: {},
+  });
+  ev("path-fallback-differs-from-normal", `${fb.fallback}`);
+  await check("path-fallback-long-home-linux", { platform: "linux", home: longHome, env: {} });
+
+  // multibyte: character count under the limit, UTF-8 byte count over it
+  const mbHome = path.join(mk("h5"), "é".repeat(30));
+  const mbNormal = path.join(
+    dirsFor({ env: {}, platform: "darwin", home: mbHome }).runtimeDir,
+    "vaultd.sock",
+  );
+  ev(
+    "path-multibyte-sizes",
+    `chars=${mbNormal.length} bytes=${Buffer.byteLength(mbNormal)} (limit ${SOCKET_MAX_BYTES.darwin})`,
+  );
+  fs.mkdirSync(path.dirname(mbNormal), { recursive: true });
+  const raw = net.createServer();
+  const rawR = await tryListen(raw, mbNormal);
+  ev("path-multibyte-raw-listen", rawR.ok ? "ok" : `${rawR.code}`);
+  if (rawR.ok) raw.close();
+  const mb = await check("path-fallback-multibyte-home", {
+    platform: "darwin",
+    home: mbHome,
+    env: {},
+  });
+  if (!mb.fallback && Buffer.byteLength(mb.path) > SOCKET_MAX_BYTES.darwin)
+    failures.push("multibyte");
+
+  // the fallback dir name is predictable: a dir pre-created by another user must be refused
+  const sharedTmp = "/tmp";
+  const evil = path.join(sharedTmp, `av-${process.getuid()}`);
+  const mkEvil = await run("sudo", ["-n", "-u", "nobody", "mkdir", "-m", "0777", evil], {
+    cwd: "/",
+  });
+  if (mkEvil.code === 0) {
+    const r = resolveSocket({ platform: "darwin", home: longHome, env: {}, tmpdir: sharedTmp });
+    let refused = "NOT refused";
+    try {
+      ensurePrivateDir(r.dir);
+    } catch (e) {
+      refused = `refused: ${e.message}`;
+    }
+    ev("path-fallback-dir-precreated-by-other-user", refused);
+    if (!refused.startsWith("refused")) failures.push("fallback-precreated");
+    await run("sudo", ["-n", "rm", "-rf", evil]);
+  } else {
+    ev(
+      "path-fallback-dir-precreated-by-other-user",
+      `SKIPPED (${mkEvil.stderr.trim().slice(0, 100)})`,
+    );
+  }
+  fs.rmSync(path.join(os.tmpdir(), `av-${process.getuid()}`), { recursive: true, force: true });
+  for (const d of cleanup) fs.rmSync(d, { recursive: true, force: true });
 }
 
 fs.rmSync(base, { recursive: true, force: true });

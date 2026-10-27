@@ -26,6 +26,8 @@ foreach ($pair in @(@('token-file', $TokenFile), @('control-file', $ControlFile)
   }
 }
 if ($Port -gt 0) {
+  $ns = netstat -ano -p tcp | Select-String (":" + $Port + "\s+\S+\s+LISTENING")
+  if ($ns) { Write-Output ("PROBE netstat: port $Port visible: " + ($ns -join ' ').Trim()) } else { Write-Output "PROBE netstat: port $Port NOT visible" }
   try {
     $tc = New-Object System.Net.Sockets.TcpClient
     $tc.Connect('127.0.0.1', $Port)

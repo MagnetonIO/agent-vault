@@ -1,6 +1,6 @@
 // Shared helpers for the S2 spike scripts. Throwaway: no deps, plain Node 24.
 import { spawn } from "node:child_process";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -48,44 +48,93 @@ export function tryListen(server, ...args) {
   });
 }
 
-// ---- token handshake (the exact protocol the real daemon will use over TCP) ----------------
-// Client -> server, first line: `<64 lowercase hex chars>\n` (32 random bytes).
-// Server: match (timingSafeEqual) -> writes `ok\n`, then JSON-RPC lines flow.
-//         mismatch, over 128 bytes with no newline, or no line within 1500 ms -> destroy the
-//         socket with no reply.
-export const FIRST_LINE_MAX = 128;
-export const FIRST_LINE_TIMEOUT_MS = 1500;
+// ---- mutual token handshake (the exact protocol the real daemon will use over TCP) ----------
+// All lines are `\n`-terminated ASCII. `token` is 32 random bytes (64 lowercase hex chars),
+// regenerated at every daemon start, never sent on the wire. HMAC key = the 32 raw token bytes;
+// HMAC message = the ASCII label followed by the ASCII hex nonce.
+//   1. client -> `nonce_c`                      (32 random bytes, 64 hex)
+//   2. server -> `HMAC(token,"srv"+nonce_c) nonce_s`   (mac hex, space, 32 random bytes hex)
+//   3. client verifies the mac with timingSafeEqual and sends NOTHING else until it matches.
+//      Mismatch, malformed line or no reply in 2500 ms: close, error "vaultd identity check failed".
+//   4. client -> `HMAC(token,"cli"+nonce_s)`, then JSON-RPC lines may follow immediately.
+//   5. server verifies; on mismatch it closes without a reply and serves nothing.
+// Server limits: every line max 128 bytes, each step must complete within 1500 ms.
+export const LINE_MAX = 128;
+export const STEP_TIMEOUT_MS = 1500;
+export const CLIENT_TIMEOUT_MS = 2500;
+export const IDENTITY_ERROR = "vaultd identity check failed";
+const HEX64 = /^[0-9a-f]{64}$/;
 
-/** `onAuthed(socket, leftover)` runs after the token line has matched. */
-export function createTokenServer(token, onAuthed) {
-  const want = Buffer.from(token, "utf8");
-  return net.createServer((socket) => {
-    let buf = Buffer.alloc(0);
-    const timer = setTimeout(() => socket.destroy(), FIRST_LINE_TIMEOUT_MS);
-    const onData = (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
-      const nl = buf.indexOf(0x0a);
-      if (nl === -1) {
-        if (buf.length > FIRST_LINE_MAX) {
-          clearTimeout(timer);
-          socket.destroy();
+export const newNonce = () => randomBytes(32).toString("hex");
+export const newToken = () => randomBytes(32).toString("hex");
+export const mac = (token, label, nonceHex) =>
+  createHmac("sha256", Buffer.from(token, "hex")).update(`${label}${nonceHex}`).digest("hex");
+const sameHex = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+/** Line reader over a socket that keeps bytes after the newline for the next call. */
+export function lineReader(socket) {
+  let buf = Buffer.alloc(0);
+  let wake = null;
+  const onData = (c) => {
+    buf = Buffer.concat([buf, c]);
+    wake?.();
+  };
+  const onEnd = () => wake?.();
+  socket.on("data", onData);
+  socket.on("close", onEnd);
+  socket.on("error", onEnd);
+  return {
+    async line(max, timeoutMs) {
+      const end = Date.now() + timeoutMs;
+      for (;;) {
+        const nl = buf.indexOf(0x0a);
+        if (nl >= 0) {
+          const l = buf.subarray(0, nl).toString("latin1");
+          buf = buf.subarray(nl + 1);
+          return l;
         }
-        return;
+        if (buf.length > max) throw new Error("line too long");
+        if (socket.destroyed) throw new Error("closed");
+        const left = end - Date.now();
+        if (left <= 0) throw new Error("timeout");
+        await new Promise((r) => {
+          const t = setTimeout(r, left);
+          wake = () => {
+            clearTimeout(t);
+            r();
+          };
+        });
+        wake = null;
       }
+    },
+    /** Stop reading; return whatever was already buffered. */
+    detach() {
       socket.off("data", onData);
-      clearTimeout(timer);
-      const line = buf.subarray(0, nl);
-      const ok = line.length === want.length && timingSafeEqual(line, want);
-      if (!ok) {
-        socket.destroy();
-        return;
-      }
-      socket.write("ok\n");
-      onAuthed(socket, buf.subarray(nl + 1));
-    };
-    socket.on("data", onData);
+      socket.off("close", onEnd);
+      socket.off("error", onEnd);
+      const b = buf;
+      buf = Buffer.alloc(0);
+      return b;
+    },
+  };
+}
+
+/** `onAuthed(socket, leftover)` runs only after the client proved it knows the token. */
+export function createMutualServer(token, onAuthed) {
+  return net.createServer(async (socket) => {
     socket.on("error", () => {});
-    socket.on("close", () => clearTimeout(timer));
+    const rd = lineReader(socket);
+    try {
+      const nonceC = await rd.line(LINE_MAX, STEP_TIMEOUT_MS);
+      if (!HEX64.test(nonceC)) throw new Error("bad nonce");
+      const nonceS = newNonce();
+      socket.write(`${mac(token, "srv", nonceC)} ${nonceS}\n`);
+      const cli = await rd.line(LINE_MAX, STEP_TIMEOUT_MS);
+      if (!sameHex(cli, mac(token, "cli", nonceS))) throw new Error("bad client mac");
+      onAuthed(socket, rd.detach());
+    } catch {
+      socket.destroy();
+    }
   });
 }
 
@@ -106,6 +155,94 @@ export function echoLines(socket, leftover) {
     flush();
   });
   flush();
+}
+
+/**
+ * The real client. Sends the nonce, verifies the server's mac, and only then sends the client
+ * mac and `payload`. `payloadBytesSent` is 0 whenever the identity check fails.
+ */
+export async function mutualConnect(connectOpts, token, { payload = "", waitMs = 1200 } = {}) {
+  const socket = net.connect(connectOpts);
+  socket.on("error", () => {});
+  const out = { ok: false, error: null, payloadBytesSent: 0, data: "" };
+  try {
+    await new Promise((res, rej) => {
+      socket.once("connect", res);
+      socket.once("error", rej);
+    });
+    const rd = lineReader(socket);
+    const nonceC = newNonce();
+    socket.write(`${nonceC}\n`);
+    let reply;
+    try {
+      reply = await rd.line(LINE_MAX, CLIENT_TIMEOUT_MS);
+    } catch {
+      out.error = `${IDENTITY_ERROR} (no usable reply)`;
+      return out;
+    }
+    const m = /^([0-9a-f]{64}) ([0-9a-f]{64})$/.exec(reply);
+    if (!m || !sameHex(m[1], mac(token, "srv", nonceC))) {
+      out.error = IDENTITY_ERROR;
+      return out;
+    }
+    socket.write(`${mac(token, "cli", m[2])}\n`);
+    if (payload) {
+      socket.write(payload);
+      out.payloadBytesSent = Buffer.byteLength(payload);
+    }
+    const pre = rd.detach();
+    out.data = pre.toString("utf8");
+    socket.on("data", (d) => {
+      out.data += d.toString("utf8");
+    });
+    await sleep(waitMs);
+    out.ok = true;
+    return out;
+  } catch (e) {
+    out.error = `connect failed: ${e.code ?? e.message}`;
+    return out;
+  } finally {
+    socket.destroy();
+  }
+}
+
+/**
+ * Attacker that does NOT know the token. Sends a valid nonce, reads the server's reply, then
+ * answers per `mode` ("bogus" = 64 f's, "reflect" = replays the server's own mac) and tries a
+ * JSON-RPC request. Reports what the server returned after the reply line.
+ */
+export function attack(connectOpts, mode) {
+  return new Promise((resolve) => {
+    const out = { afterReply: "", serverClosed: false };
+    const socket = net.connect(connectOpts);
+    let first = true;
+    let buf = "";
+    socket.on("error", () => {});
+    socket.on("connect", () => socket.write(`${newNonce()}\n`));
+    socket.on("data", (d) => {
+      buf += d.toString("utf8");
+      if (first) {
+        const nl = buf.indexOf("\n");
+        if (nl < 0) return;
+        first = false;
+        const serverMac = buf.slice(0, nl).split(" ")[0];
+        buf = buf.slice(nl + 1);
+        const fake = mode === "reflect" ? serverMac : "f".repeat(64);
+        socket.write(`${fake}\n{"jsonrpc":"2.0","id":9,"method":"list"}\n`);
+      }
+    });
+    const done = () => {
+      out.afterReply = buf;
+      socket.destroy();
+      resolve(out);
+    };
+    const timer = setTimeout(done, 2500);
+    socket.on("close", () => {
+      out.serverClosed = true;
+      clearTimeout(timer);
+      done();
+    });
+  });
 }
 
 /**
