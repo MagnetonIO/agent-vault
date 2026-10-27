@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.test.json",
     "test": "vitest run",
     "lint": "biome check .",
     "dev": "tsx watch packages/cli/src/main.ts daemon run"

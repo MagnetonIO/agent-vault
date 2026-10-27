@@ -22,5 +22,6 @@ jobs:
           cache: pnpm
       - run: pnpm i --frozen-lockfile
       - run: pnpm build
+      - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test

@@ -1,4 +1,7 @@
 packages:
   - packages/*
+# pnpm 12 fails installs on unreviewed dependency install scripts. esbuild (pulled in by
+# vitest/tsx) is denied explicitly: its postinstall only verifies the platform binary, which
+# arrives via optional deps anyway. Every native dep added later needs its own entry here.
 allowBuilds:
   esbuild: false
