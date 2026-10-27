@@ -15,7 +15,13 @@ import {
   type InstallReport,
 } from "./adapter.js";
 import { backupFile, writeFileAtomic } from "./backup.js";
-import { defaultRunProbe, fakeKey, type ProbeRunner, tagFirst } from "./claude-code.js";
+import {
+  defaultRunProbe,
+  fakeKey,
+  type ProbeRunner,
+  tagFirst,
+  versionManagerOf,
+} from "./claude-code.js";
 import { type HookClient, handlePromptSubmit, handleScrub } from "./hook.js";
 import {
   appendHook,
@@ -27,7 +33,14 @@ import {
   removeHooks,
   splitCommand,
 } from "./hook-config.js";
-import { JsonEditError, parseJson } from "./json-edit.js";
+import {
+  type FileState,
+  type InstallState,
+  loadState,
+  pruneFrom,
+  saveState,
+} from "./install-state.js";
+import { JsonEditError, type JsonPath, missingContainers, parseJson } from "./json-edit.js";
 import {
   appendTable,
   insertUnderHeader,
@@ -62,8 +75,10 @@ export type CodexDeps = {
   home?: string | undefined;
   /** Default `process.env`; only `CODEX_HOME` is read from it. */
   env?: NodeJS.ProcessEnv | undefined;
-  /** Where `adapters/codex-state.json` lives. Default `getPaths().dataDir`. */
-  dataDir?: string | undefined;
+  /** What an install records for its uninstall. Default `<dataDir>/adapters/codex-state.json`. */
+  stateFile?: string | undefined;
+  /** Overall deadline of the prompt hook; see `HOOK_DEADLINE_MS`. */
+  deadlineMs?: number | undefined;
   /** Default `getPaths().backupsDir`. */
   backupsDir?: string | undefined;
   /** Default: spawn `codex` from PATH. Tests inject one: they must never run the real binary. */
@@ -75,17 +90,15 @@ export type CodexDeps = {
   log?: ((message: string) => void) | undefined;
 };
 
-/** What install did to one `config.toml`, so uninstall can take back exactly that. */
+/** What install did to `config.toml`, so uninstall can take back exactly that. */
 type ConfigRecord = {
   createdFile: boolean;
-  createdHooksFile: boolean;
   /** "cli" if `codex mcp add` wrote the MCP table (uninstall runs `codex mcp remove`). */
   mcp: "cli" | null;
   edits: TomlEdit[];
   /** Trust keys whose hook changed under them, with the `trusted_hash` that went stale. */
   staleTrust: Record<string, string>;
 };
-type State = { version: 1; configs: Record<string, ConfigRecord> };
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -109,17 +122,8 @@ function defaultRunCodex(env: NodeJS.ProcessEnv): CodexRunner {
     });
 }
 
-const emptyRecord = (): ConfigRecord => ({
-  createdFile: false,
-  createdHooksFile: false,
-  mcp: null,
-  edits: [],
-  staleTrust: {},
-});
-
 const recordIsEmpty = (r: ConfigRecord): boolean =>
   !r.createdFile &&
-  !r.createdHooksFile &&
   r.mcp === null &&
   r.edits.length === 0 &&
   Object.keys(r.staleTrust).length === 0;
@@ -154,7 +158,7 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
   const homeDir = (): string => deps.home ?? os.homedir();
   const backupsDir = (): string => deps.backupsDir ?? getPaths().backupsDir;
   const stateFile = (): string =>
-    path.join(deps.dataDir ?? getPaths().dataDir, "adapters", "codex-state.json");
+    deps.stateFile ?? path.join(getPaths().dataDir, "adapters", "codex-state.json");
 
   const codexHome = (home: string): string =>
     env.CODEX_HOME ? path.resolve(env.CODEX_HOME) : path.join(home, ".codex");
@@ -173,6 +177,20 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
     // S3 never saw SessionEnd in Codex: the scrub runs at the next SessionStart.
     { event: "SessionStart", command: words("hook", "codex", "scrub"), timeout: SCRUB_TIMEOUT_S },
   ];
+
+  /** The command words this adapter writes now, quoted. */
+  const prefix = (): string => quoteCommand(deps.command, platform);
+  /**
+   * Entries are ours only if they start with the command words an install wrote: the ones it
+   * would write now, or the ones it recorded (the binary may have moved since).
+   */
+  const prefixesOf = (recorded: FileState | undefined): string[] => [
+    ...new Set([prefix(), ...(recorded ? [recorded.prefix] : [])]),
+  ];
+  const isOurHook =
+    (prefixes: string[]) =>
+    (command: string): boolean =>
+      prefixes.some((p) => command.startsWith(`${p}${CODEX_HOOK_MARKER}`));
 
   const read = (file: string): string | null => {
     try {
@@ -200,23 +218,26 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
     }
   };
 
-  const readState = (): State => {
-    try {
-      const raw = JSON.parse(fs.readFileSync(stateFile(), "utf8")) as State;
-      if (raw.version === 1 && isRecord(raw.configs)) return raw;
-    } catch {
-      // absent or damaged: nothing is known to be ours
-    }
-    return { version: 1, configs: {} };
+  /** The config.toml part of the state (kept in the `toml` field of its `FileState`). */
+  const recordOf = (state: InstallState, configPath: string): ConfigRecord => {
+    const f = state.files[configPath];
+    return {
+      createdFile: f?.createdFile ?? false,
+      mcp: f?.toml?.mcp ?? null,
+      edits: f?.toml?.edits ?? [],
+      staleTrust: f?.toml?.staleTrust ?? {},
+    };
   };
-  const saveState = (state: State): void => {
-    const file = stateFile();
-    if (Object.keys(state.configs).length === 0) {
-      fs.rmSync(file, { force: true });
-      return;
+  const storeRecord = (state: InstallState, configPath: string, rec: ConfigRecord): void => {
+    if (recordIsEmpty(rec)) delete state.files[configPath];
+    else {
+      state.files[configPath] = {
+        createdFile: rec.createdFile,
+        created: [],
+        prefix: prefix(),
+        toml: { mcp: rec.mcp, edits: rec.edits, staleTrust: rec.staleTrust },
+      };
     }
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   };
 
   const put = (file: string, text: string, existed: boolean): void => {
@@ -411,27 +432,59 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
       }
 
       // hooks.json: keep what is already right (trust is tied to a hook's command and place).
+      const state = loadState(stateFile());
+      const prevHooks = state.files[hooksPath];
+      const prefixes = prefixesOf(prevHooks);
+      const isOurs = isOurHook(prefixes);
       const specs = hookSpecs();
       const oldHooks = hooksText ?? "";
       let nextHooks = oldHooks;
       const wanted = new Set(specs.map((s) => `${s.event}\0${s.command}`));
       const kept = new Set<string>();
-      const stale = findHooks(nextHooks, CODEX_HOOK_MARKER).filter((h) => {
+      const stale = findHooks(nextHooks, isOurs).filter((h) => {
         const k = `${h.event}\0${h.command}`;
         if (!wanted.has(k) || kept.has(k)) return true;
         kept.add(k);
         return false;
       });
       for (const h of stale.reverse()) nextHooks = removeHookEntry(nextHooks, h);
+      const created: JsonPath[] = [];
       for (const spec of specs) {
-        if (!kept.has(`${spec.event}\0${spec.command}`)) nextHooks = appendHook(nextHooks, spec);
+        if (kept.has(`${spec.event}\0${spec.command}`)) continue;
+        for (const p of missingContainers(nextHooks, ["hooks", spec.event])) {
+          if (!created.some((c) => c.join("\0") === p.join("\0"))) created.push(p);
+        }
+        nextHooks = appendHook(nextHooks, spec);
+      }
+      // Containers a previous install made and the user has since filled stay recorded.
+      for (const p of prevHooks?.created ?? []) {
+        if (
+          missingContainers(nextHooks, p).length === 0 &&
+          !created.some((c) => c.join("\0") === p.join("\0"))
+        ) {
+          created.push(p);
+        }
       }
       const hooksChanged = nextHooks !== oldHooks;
 
-      const report: InstallReport = { harness: "codex", files: [], backups: [], notes: [] };
-      const state = readState();
-      const rec = state.configs[configPath] ?? emptyRecord();
-      state.configs[configPath] = rec;
+      const report: InstallReport = {
+        harness: "codex",
+        files: [],
+        backups: [],
+        notes: [],
+        warnings: [],
+      };
+      const manager = versionManagerOf(deps.command[0] as string);
+      if (manager) {
+        report.warnings?.push(
+          `the hooks run ${deps.command[0]}, which belongs to ${manager}: removing or switching that Node version silently disables prompt capture. Run \`agent-vault doctor codex\` after upgrading Node, or install the single-file binary.`,
+        );
+      }
+      const rec = recordOf(state, configPath);
+      const persist = (): void => {
+        storeRecord(state, configPath, rec);
+        saveState(stateFile(), state);
+      };
       const backedUp = new Set<string>();
       const backup = (file: string): void => {
         if (backedUp.has(file) || !fs.existsSync(file)) return;
@@ -461,8 +514,15 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
             rec.staleTrust[key] = row.trusted_hash;
           }
         }
-        if (hooksText === null) rec.createdHooksFile = true;
-        saveState(state);
+        const whitespace =
+          hooksText !== null && hooksText.trim() === "" ? hooksText : prevHooks?.whitespace;
+        state.files[hooksPath] = {
+          createdFile: hooksText === null || (prevHooks?.createdFile ?? false),
+          ...(whitespace !== undefined && { whitespace }),
+          created,
+          prefix: prefix(),
+        };
+        persist();
         backup(hooksPath);
         put(hooksPath, nextHooks, hooksText !== null);
         report.files.push(hooksPath);
@@ -472,14 +532,14 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
         const mark = rec.edits.length;
         rec.edits.push(...edits);
         if (configText === null) rec.createdFile = true;
-        saveState(state);
+        persist();
         try {
           backup(configPath);
           put(configPath, cfg, configText !== null);
         } catch (err) {
           rec.edits.length = mark;
           if (configText === null) rec.createdFile = false;
-          saveState(state);
+          persist();
           throw err;
         }
         report.files.push(configPath);
@@ -529,26 +589,21 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
           );
           rec.edits.push(made.edit);
           if (text === null) rec.createdFile = true;
-          saveState(state);
+          persist();
           put(configPath, made.text, text !== null);
           if (!report.files.includes(configPath)) report.files.push(configPath);
           report.notes.push(`MCP server agent-vault written to ${configPath}`);
         }
       }
 
-      if (recordIsEmpty(rec)) delete state.configs[configPath];
-      saveState(state);
+      persist();
 
       // Trust: only Codex can grant it. If the hook is unchanged and already trusted, nothing to ask.
-      const prompt = findHooks(nextHooks, CODEX_HOOK_MARKER).find(
-        (h) => h.event === "UserPromptSubmit",
-      );
+      const prompt = findHooks(nextHooks, isOurs).find((h) => h.event === "UserPromptSubmit");
       const trusted = prompt
         ? trustOf(parsedToml(configPath, read(configPath)), hooksPath, prompt)
         : undefined;
-      const stillTrusted =
-        trusted !== undefined &&
-        state.configs[configPath]?.staleTrust[trusted.key] !== trusted.hash;
+      const stillTrusted = trusted !== undefined && rec.staleTrust[trusted.key] !== trusted.hash;
       if (!hooksChanged && stillTrusted) {
         report.notes.push("the prompt hook is already trusted by Codex; nothing more to do");
       } else {
@@ -560,26 +615,30 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
     async uninstall(home) {
       const hooksPath = hooksFile(home);
       const configPath = configFile(home);
-      const state = readState();
-      const rec = state.configs[configPath];
+      const state = loadState(stateFile());
+      const recordedHooks = state.files[hooksPath];
+      const rec = recordOf(state, configPath);
 
       const hooksText = read(hooksPath);
       if (hooksText !== null) {
         parsedJson(hooksPath, hooksText);
-        const next = removeHooks(hooksText, CODEX_HOOK_MARKER);
+        const next = removeHooks(
+          hooksText,
+          isOurHook(prefixesOf(recordedHooks)),
+          pruneFrom(recordedHooks),
+        );
         if (next !== hooksText) {
           backupFile(hooksPath, backupsDir());
-          const left = parseJson(next);
-          const hooks = left.hooks;
-          const nothingLeft =
-            Object.keys(left).length === 0 ||
-            (Object.keys(left).length === 1 && isRecord(hooks) && Object.keys(hooks).length === 0);
-          if (rec?.createdHooksFile && nothingLeft) fs.rmSync(hooksPath);
-          else writeFileAtomic(hooksPath, next);
+          const bare = Object.keys(parseJson(next)).length === 0;
+          if (bare && recordedHooks?.createdFile) fs.rmSync(hooksPath, { force: true });
+          else if (bare && recordedHooks?.whitespace !== undefined) {
+            writeFileAtomic(hooksPath, recordedHooks.whitespace);
+          } else writeFileAtomic(hooksPath, next);
         }
       }
+      delete state.files[hooksPath];
 
-      if (rec) {
+      if (!recordIsEmpty(rec)) {
         if (rec.mcp === "cli" && fs.existsSync(configPath)) {
           backupFile(configPath, backupsDir());
           await runCodex(home)(["mcp", "remove", MCP_NAME]);
@@ -596,9 +655,9 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
             writeFileAtomic(configPath, next);
           }
         }
-        delete state.configs[configPath];
-        saveState(state);
       }
+      delete state.files[configPath];
+      saveState(stateFile(), state);
     },
 
     async doctor(home): Promise<DoctorReport> {
@@ -638,7 +697,11 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
       }
 
       // hooks
-      const found = hooksText === null ? [] : findHooks(hooksText, CODEX_HOOK_MARKER);
+      const loaded = loadState(stateFile());
+      const found =
+        hooksText === null
+          ? []
+          : findHooks(hooksText, isOurHook(prefixesOf(loaded.files[hooksPath])));
       const prompt = found.find(
         (h) => h.event === "UserPromptSubmit" && h.command.endsWith(" prompt-submit"),
       );
@@ -660,12 +723,20 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
             .filter((w) => !fs.existsSync(w));
           if (gone.length > 0) {
             add("hooks", false, `the hook runs ${gone[0]}, which does not exist`, reinstall);
-          } else add("hooks", true, `2 hook entries in ${hooksPath}`);
+          } else {
+            add("hooks", true, `2 hook entries in ${hooksPath}`);
+            const node = splitCommand(found[0]?.command ?? "")[0] ?? "";
+            const manager = versionManagerOf(node);
+            if (manager) {
+              const last = checks[checks.length - 1] as DoctorCheck;
+              last.warning = `the hooks run ${node}, which belongs to ${manager}: if that Node version is removed, prompt capture stops without any message`;
+            }
+          }
         }
       }
 
       // trust: Codex skips a hook it has not been told to trust, silently, and sends the prompt
-      const stale = readState().configs[configPath]?.staleTrust ?? {};
+      const stale = loaded.files[configPath]?.toml?.staleTrust ?? {};
       const trustFor = (h: HookEntry | undefined) => {
         const t = h ? trustOf(root, hooksPath, h) : undefined;
         return t && stale[t.key] !== t.hash ? t : undefined;
@@ -791,6 +862,8 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
       return { harness: "codex", ok: checks.every((c) => c.ok), checks };
     },
 
+    blockOutput,
+
     async handleHook(event, input, opts?: HookOptions): Promise<HookOutput> {
       const harness = "codex";
       if (event === "scrub") {
@@ -807,6 +880,7 @@ export function createCodexAdapter(deps: CodexDeps): HarnessAdapter {
         historyFiles: adapter.historyFiles(homeDir(), input),
         client: deps.client,
         probe: opts?.probe,
+        deadlineMs: deps.deadlineMs,
         log,
       });
       return decision.block ? blockOutput(decision.reason) : null;

@@ -152,14 +152,29 @@ describe("codex hook", { timeout: TIMEOUT_MS }, () => {
     });
   });
 
-  test("stdin that is not JSON, empty, or over 8 MiB, and an unknown event: exit 0, nothing on stdout", async () => {
-    for (const stdin of ["this is not json", "", "{", "a".repeat(9 * 1024 * 1024)]) {
+  test("stdin that is not JSON, or empty, and an unknown event: exit 0, nothing on stdout", async () => {
+    for (const stdin of ["this is not json", "", "{"]) {
       expect(await hook("prompt-submit", stdin), stdin.slice(0, 12)).toMatchObject({
         code: 0,
         stdout: "",
       });
     }
     expect(await hook("nonsense", s3Input(sb, PAT))).toMatchObject({ code: 0, stdout: "" });
+  });
+
+  test("a prompt over 8 MiB is blocked in Codex's shape, key or not, because it cannot be checked", async () => {
+    const before = (await secretsOf(sb)).length;
+    for (const filler of [`${PAT} ${"a".repeat(9 * 1024 * 1024)}`, "a".repeat(9 * 1024 * 1024)]) {
+      const res = await hook("prompt-submit", s3Input(sb, filler));
+      expect(res.code, res.stderr).toBe(0);
+      expect(JSON.parse(res.stdout)).toEqual({
+        decision: "block",
+        reason:
+          "Prompt over 8 MiB; agent-vault cannot check it. Paste keys separately with agent-vault grab.",
+      });
+      expect(res.stdout + res.stderr).not.toContain(PAT);
+    }
+    expect((await secretsOf(sb)).length).toBe(before);
   });
 
   test("--probe blocks a key without storing it", async () => {
@@ -182,7 +197,7 @@ describe("codex hook, vault unavailable", { timeout: TIMEOUT_MS }, () => {
     expect(res.code, res.stderr).toBe(0);
     expect(JSON.parse(res.stdout)).toEqual({
       decision: "block",
-      reason: "Key held back from the model. Run: agent-vault init, then paste again.",
+      reason: "Key held back from the model. Run: agent-vault doctor codex",
     });
     expect(res.stdout + res.stderr).not.toContain(PAT);
     expect(await sb.daemonPid()).toBeNull();

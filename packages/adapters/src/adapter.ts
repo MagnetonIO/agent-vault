@@ -31,6 +31,8 @@ export type InstallReport = {
    * box as the very last output.
    */
   action?: string | undefined;
+  /** Things that work now but may stop working; shown on stderr. */
+  warnings?: string[] | undefined;
 };
 
 export type DoctorCheck = {
@@ -41,6 +43,8 @@ export type DoctorCheck = {
   fix?: string | undefined;
   /** For an `ok` check that still deserves a look (`warn`) or is only a fact (`info`). */
   severity?: "warn" | "info" | undefined;
+  /** The check passes, but something may stop it from passing later. */
+  warning?: string | undefined;
 };
 
 export type DoctorReport = {
@@ -74,6 +78,11 @@ export interface HarnessAdapter {
    * print. It must not throw for a prompt without a key: a crash there must let the prompt through.
    */
   handleHook(event: string, input: unknown, opts?: HookOptions): Promise<HookOutput>;
+  /**
+   * The harness's JSON for blocking a prompt with this reason. The CLI uses it where the adapter
+   * cannot run (a prompt too large to read): a prompt that cannot be checked must not go through.
+   */
+  blockOutput(reason: string): HookOutput;
   /** Files that can hold what the user typed: the harness's history, and `input`'s transcript. */
   historyFiles(home: string, input?: unknown): string[];
 }

@@ -13,8 +13,8 @@ import {
   createCodexAdapter,
   EXPOSED_TAG,
   findHooks,
-  HELD_BACK_REASON,
   type HookClient,
+  heldBackReason,
   type ProbeRunner,
   parseJson,
   TRUST_ACTION,
@@ -103,7 +103,7 @@ function make(
     command,
     home: box.home,
     env: extra.env ?? { CODEX_HOME: box.codexHome },
-    dataDir: box.paths.dataDir,
+    stateFile: stateFile(),
     backupsDir: box.paths.backupsDir,
     runCodex,
     runProbe,
@@ -327,7 +327,7 @@ describe("install", () => {
       command: ["agent-vault"],
       home: box.home,
       env: { CODEX_HOME: box.codexHome },
-      dataDir: box.paths.dataDir,
+      stateFile: stateFile(),
       client: () => Promise.reject(new Error("never connected")),
     });
     await expect(bare.install({ home: box.home })).rejects.toThrow(AdapterError);
@@ -630,6 +630,54 @@ describe("uninstall", () => {
     expect(read(hooksFile())).toBe(USER_HOOKS);
   });
 
+  test("only entries that start with our command words are ours", async () => {
+    const m = make();
+    const lookalike = `echo run ${m.command[1]} hook codex prompt-submit please`;
+    const foreign = `/opt/other/tool hook codex scrub`;
+    write(
+      hooksFile(),
+      `${JSON.stringify(
+        {
+          hooks: {
+            UserPromptSubmit: [{ hooks: [{ type: "command", command: lookalike }] }],
+            SessionStart: [{ hooks: [{ type: "command", command: foreign }] }],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    const before = read(hooksFile());
+    await m.adapter.install({ home: box.home });
+    const commands = parseJson(read(hooksFile())).hooks as Record<
+      string,
+      { hooks: { command: string }[] }[]
+    >;
+    expect(commands.UserPromptSubmit?.map((g) => g.hooks[0]?.command)).toContain(lookalike);
+    expect(commands.SessionStart?.map((g) => g.hooks[0]?.command)).toContain(foreign);
+    expect(commands.UserPromptSubmit).toHaveLength(2);
+    await m.adapter.uninstall(box.home);
+    expect(read(hooksFile())).toBe(before);
+  });
+
+  test("a hooks object the user already had stays, an empty one we made goes", async () => {
+    const m = make();
+    write(hooksFile(), '{ "hooks": {} }\n');
+    await m.adapter.install({ home: box.home });
+    await m.adapter.uninstall(box.home);
+    expect(read(hooksFile())).toBe('{ "hooks": {} }\n');
+
+    fs.rmSync(hooksFile());
+    await m.adapter.install({ home: box.home });
+    await m.adapter.uninstall(box.home);
+    expect(fs.existsSync(hooksFile())).toBe(false);
+  });
+
+  test("blockOutput is exactly {decision, reason}", () => {
+    const out = make().adapter.blockOutput("because");
+    expect(JSON.stringify(out)).toBe('{"decision":"block","reason":"because"}');
+  });
+
   test("with nothing installed, nothing is created", async () => {
     await make().adapter.uninstall(box.home);
     expect(fs.existsSync(hooksFile())).toBe(false);
@@ -840,7 +888,7 @@ describe("prompt-submit hook", () => {
   test("with the daemon unreachable, a key still blocks, with the init hint", async () => {
     const m = make({ client: () => Promise.reject(new Error("connect ECONNREFUSED")) });
     const out = await m.adapter.handleHook("prompt-submit", promptInput(`k ${PAT}`));
-    expect(out).toEqual({ decision: "block", reason: HELD_BACK_REASON });
+    expect(out).toEqual({ decision: "block", reason: heldBackReason("codex") });
     expect(m.logs.join("\n")).not.toContain(PAT);
   });
 

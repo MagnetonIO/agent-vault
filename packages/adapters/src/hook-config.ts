@@ -1,4 +1,11 @@
-import { appendAt, parseJson, removeAt } from "./json-edit.js";
+import {
+  appendAt,
+  type JsonPath,
+  missingContainers,
+  type PruneFn,
+  parseJson,
+  removeAt,
+} from "./json-edit.js";
 
 /**
  * Hook entries in a harness's JSON config: `{ hooks: { <Event>: [ { hooks: [ { type, command,
@@ -63,8 +70,15 @@ export function splitCommand(line: string): string[] {
   return words;
 }
 
-/** Every hook whose command contains `marker`, in file order. */
-export function findHooks(text: string, marker: string): HookEntry[] {
+/** Which hook commands are ours: contain this text, or satisfy this test. */
+export type CommandMatch = string | ((command: string) => boolean);
+
+const matcher = (match: CommandMatch): ((command: string) => boolean) =>
+  typeof match === "string" ? (c) => c.includes(match) : match;
+
+/** Every hook whose command matches, in file order. */
+export function findHooks(text: string, match: CommandMatch): HookEntry[] {
+  const isOurs = matcher(match);
   const hooks = parseJson(text).hooks;
   const out: HookEntry[] = [];
   if (!isRecord(hooks)) return out;
@@ -74,7 +88,7 @@ export function findHooks(text: string, marker: string): HookEntry[] {
       const list = isRecord(group) ? group.hooks : undefined;
       if (!Array.isArray(list)) return;
       list.forEach((hook, index) => {
-        if (isRecord(hook) && typeof hook.command === "string" && hook.command.includes(marker)) {
+        if (isRecord(hook) && typeof hook.command === "string" && isOurs(hook.command)) {
           out.push({ event, command: hook.command, group: g, index });
         }
       });
@@ -83,32 +97,45 @@ export function findHooks(text: string, marker: string): HookEntry[] {
   return out;
 }
 
-/** Remove every hook whose command contains `marker`, and the groups and objects that leaves empty. */
-export function removeHooks(text: string, marker: string): string {
+/**
+ * Remove every matching hook, and the group around it when it was the only one in it. An event
+ * list or `hooks` object that this empties goes too only if `prune` says an install created it.
+ */
+export function removeHooks(text: string, match: CommandMatch, prune?: PruneFn): string {
   let out = text;
   for (;;) {
-    const hits = findHooks(out, marker);
-    const hit = hits[hits.length - 1]; // the last one first: earlier indexes stay valid
+    const hit = findHooks(out, match).at(-1); // the last one first: earlier indexes stay valid
     if (!hit) return out;
     const group = (parseJson(out).hooks as Record<string, unknown[]>)[hit.event]?.[hit.group];
     const alone = (group as { hooks: unknown[] }).hooks.length === 1;
     out = removeAt(
       out,
       alone ? ["hooks", hit.event, hit.group] : ["hooks", hit.event, hit.group, "hooks", hit.index],
+      prune,
     );
   }
 }
 
 /**
- * Append each spec as a group of its own to its event's list. Entries that already carry `marker`
- * are removed first, so a second install replaces ours instead of duplicating it.
+ * Append each spec as a group of its own to its event's list, after removing the entries that
+ * match (a second install replaces ours instead of duplicating it). Also says which containers
+ * the install created: pass them to `removeHooks` as `prune` so an uninstall removes only those.
  */
-export function addHooks(text: string, specs: HookSpec[], marker: string): string {
-  let out = removeHooks(text, marker);
+export function addHooksTracked(
+  text: string,
+  specs: HookSpec[],
+  match: CommandMatch,
+  prune?: PruneFn,
+): { text: string; created: JsonPath[] } {
+  let out = removeHooks(text, match, prune);
+  const created: JsonPath[] = [];
   for (const { event, command, timeout } of specs) {
+    for (const path of missingContainers(out, ["hooks", event])) {
+      if (!created.some((c) => c.join("\0") === path.join("\0"))) created.push(path);
+    }
     out = appendAt(out, ["hooks", event], { hooks: [{ type: "command", command, timeout }] });
   }
-  return out;
+  return { text: out, created };
 }
 
 /** Append `spec` as a group of its own to its event's list. Nothing else in the file moves. */
@@ -130,3 +157,5 @@ export function removeHookEntry(
       : ["hooks", entry.event, entry.group, "hooks", entry.index],
   );
 }
+export const addHooks = (text: string, specs: HookSpec[], match: CommandMatch): string =>
+  addHooksTracked(text, specs, match).text;

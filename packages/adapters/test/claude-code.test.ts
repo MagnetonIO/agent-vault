@@ -14,15 +14,16 @@ import {
   createClaudeCodeAdapter,
   EXPOSED_TAG,
   findHooks,
-  HELD_BACK_REASON,
   type HookClient,
   handlePromptSubmit,
   handleScrub,
+  heldBackReason,
   type ProbeRunner,
   quoteArg,
   quoteCommand,
   splitCommand,
   tagFirst,
+  versionManagerOf,
 } from "../src/index.js";
 import { useBox } from "./helpers.js";
 
@@ -69,10 +70,12 @@ function make(
     env?: NodeJS.ProcessEnv;
     client?: () => Promise<HookClient>;
     claudeCode?: number | null;
+    command?: string[];
+    deadlineMs?: number;
   } = {},
 ): Made {
   const main = write(path.join(box.dir, "bin", "main.js"), "// stands in for the CLI\n");
-  const command = [process.execPath, main];
+  const command = extra.command ?? [process.execPath, main];
   let n = 0;
   const logs: string[] = [];
   const runClaude = vi.fn<ClaudeRunner>(async () => ({ code: extra.claudeCode ?? null }));
@@ -85,6 +88,8 @@ function make(
     home: box.home,
     env: extra.env ?? {},
     backupsDir: box.paths.backupsDir,
+    stateFile: path.join(box.dir, "state", "claude-code-state.json"),
+    ...(extra.deadlineMs !== undefined && { deadlineMs: extra.deadlineMs }),
     runClaude,
     runProbe,
     client:
@@ -158,10 +163,10 @@ describe("prompt-submit hook", () => {
     const out = await m.adapter.handleHook("prompt-submit", promptInput(`k ${PAT}`));
     expect(out).toMatchObject({
       decision: "block",
-      reason: "Key held back from the model. Run: agent-vault init, then paste again.",
+      reason: "Key held back from the model. Run: agent-vault doctor claude-code",
       hookSpecificOutput: { suppressOriginalPrompt: true },
     });
-    expect(HELD_BACK_REASON).toBe((out as { reason: string }).reason);
+    expect(heldBackReason("claude-code")).toBe((out as { reason: string }).reason);
     expect(m.logs.join("\n")).not.toContain(PAT);
   });
 
@@ -181,7 +186,7 @@ describe("prompt-submit hook", () => {
       historyFiles: [],
       client: async () => client,
     });
-    expect(decision).toMatchObject({ block: true, reason: HELD_BACK_REASON });
+    expect(decision).toMatchObject({ block: true, reason: heldBackReason("claude-code") });
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -262,6 +267,71 @@ describe("prompt-submit hook", () => {
     expect(moved.adapter.historyFiles(box.home)).toEqual([
       path.join(box.dir, "cfg", "history.jsonl"),
     ]);
+  });
+});
+
+describe("prompt-submit deadline", () => {
+  const input = () => ({ prompt: `k ${PAT}`, harness: "claude-code" as const, historyFiles: [] });
+
+  test("a secret.put that never answers still ends in a block, within the deadline", async () => {
+    const close = vi.fn();
+    const timeouts: (number | undefined)[] = [];
+    const client: HookClient = {
+      close,
+      call: (_method, _params, opts) => {
+        timeouts.push(opts?.timeoutMs);
+        return new Promise<never>(() => {});
+      },
+    };
+    const started = Date.now();
+    const decision = await handlePromptSubmit({
+      ...input(),
+      client: async () => client,
+      deadlineMs: 150,
+    });
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(decision).toEqual({ block: true, reason: heldBackReason("claude-code"), names: [] });
+    expect(close).toHaveBeenCalledOnce();
+    // Each call is bounded by what is left of the deadline.
+    expect(timeouts).toHaveLength(1);
+    expect(timeouts[0]).toBeGreaterThan(0);
+    expect(timeouts[0]).toBeLessThanOrEqual(150);
+  });
+
+  test("a connect that never answers blocks too, and a late connection is closed", async () => {
+    const close = vi.fn();
+    let release!: (c: HookClient) => void;
+    const pending = new Promise<HookClient>((r) => {
+      release = r;
+    });
+    const decision = await handlePromptSubmit({
+      ...input(),
+      client: () => pending,
+      deadlineMs: 100,
+    });
+    expect(decision).toMatchObject({ block: true, reason: heldBackReason("claude-code") });
+    const call = vi.fn();
+    release({ call, close });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(close).toHaveBeenCalledOnce();
+    expect(call).not.toHaveBeenCalled(); // nothing is stored after the answer was given
+  });
+
+  test("through the adapter, with a short deadline", async () => {
+    const m = make({ client: () => new Promise<never>(() => {}), deadlineMs: 100 });
+    const out = await m.adapter.handleHook("prompt-submit", promptInput(`k ${PAT}`));
+    expect(out).toMatchObject({
+      decision: "block",
+      reason: "Key held back from the model. Run: agent-vault doctor claude-code",
+    });
+  });
+
+  test("blockOutput is the same JSON the hook prints", () => {
+    expect(make().adapter.blockOutput("why")).toEqual({
+      decision: "block",
+      reason: "why",
+      hookSpecificOutput: { hookEventName: "UserPromptSubmit", suppressOriginalPrompt: true },
+    });
   });
 });
 
@@ -348,13 +418,107 @@ describe("install and uninstall", () => {
     expect(findHooks(once, CLAUDE_HOOK_MARKER)).toHaveLength(3);
   });
 
-  test("creates settings.json when there is none, and uninstall leaves nothing of ours", async () => {
+  test("settings.json that install created is deleted by uninstall, unless the user added to it", async () => {
     const m = make();
     const report = await m.adapter.install({ home: box.home });
     expect(findHooks(read(settingsFile()), CLAUDE_HOOK_MARKER)).toHaveLength(3);
     expect(report.backups.filter((b) => b.endsWith("settings.json"))).toEqual([]);
     await m.adapter.uninstall(box.home);
-    expect(parseJsonc(read(settingsFile()))).toEqual({});
+    expect(fs.existsSync(settingsFile())).toBe(false);
+    expect(fs.existsSync(globalFile())).toBe(false);
+
+    await m.adapter.install({ home: box.home });
+    fs.writeFileSync(settingsFile(), read(settingsFile()).replace(/^\{/, '{\n  "model": "opus",'));
+    await m.adapter.uninstall(box.home);
+    expect(parseJsonc(read(settingsFile()))).toEqual({ model: "opus" });
+  });
+
+  for (const blank of ["", "\n", "  \n\n", "\r\n"]) {
+    test(`a settings.json that held only ${JSON.stringify(blank)} comes back unchanged`, async () => {
+      write(settingsFile(), blank);
+      const m = make();
+      await m.adapter.install({ home: box.home });
+      expect(findHooks(read(settingsFile()), CLAUDE_HOOK_MARKER)).toHaveLength(3);
+      await m.adapter.uninstall(box.home);
+      expect(read(settingsFile())).toBe(blank);
+    });
+  }
+
+  for (const [name, original] of Object.entries({
+    "an empty hooks object": '{\n  "model": "opus",\n  "hooks": {}\n}\n',
+    "an empty event list": '{"hooks":{"UserPromptSubmit":[]}}',
+    "a comment in an empty hooks object": '{\n  "hooks": {\n    // keep me\n  }\n}\n',
+  })) {
+    test(`uninstall leaves ${name} exactly as it was`, async () => {
+      write(settingsFile(), original);
+      const m = make();
+      await m.adapter.install({ home: box.home });
+      await m.adapter.uninstall(box.home);
+      expect(read(settingsFile())).toBe(original);
+    });
+  }
+
+  test("only entries with our exact command words are ours", async () => {
+    const theirs = {
+      hooks: {
+        UserPromptSubmit: [
+          { hooks: [{ type: "command", command: "mywrap hook claude-code notify" }] },
+          { hooks: [{ type: "command", command: "/other/bin/tool hook claude-code scrub" }] },
+        ],
+      },
+      apiKeyHelper: "/opt/bin/node /opt/other/main.js helper prod",
+    };
+    const original = `${JSON.stringify(theirs, null, 2)}\n`;
+    write(settingsFile(), original);
+    const m = make();
+    await m.adapter.install({ home: box.home });
+    expect(parseJsonc(read(settingsFile())).hooks.UserPromptSubmit).toHaveLength(3);
+    await m.adapter.install({ home: box.home }); // replaces ours only
+    expect(parseJsonc(read(settingsFile())).hooks.UserPromptSubmit).toHaveLength(3);
+    await m.adapter.uninstall(box.home);
+    expect(read(settingsFile())).toBe(original);
+    const doctor = await m.adapter.doctor(box.home);
+    expect(doctor.checks.find((c) => c.name === "hooks")?.ok).toBe(false);
+  });
+
+  test("a moved binary: the next install replaces the entries written for the old path", async () => {
+    const m1 = make();
+    await m1.adapter.install({ home: box.home });
+    const moved = write(path.join(box.dir, "moved", "main.js"), "// moved\n");
+    const m2 = make({ command: [process.execPath, moved] });
+    await m2.adapter.install({ home: box.home });
+    const entries = findHooks(read(settingsFile()), CLAUDE_HOOK_MARKER);
+    expect(entries).toHaveLength(3);
+    for (const e of entries) expect(e.command).toContain("moved");
+    await m2.adapter.uninstall(box.home);
+    expect(fs.existsSync(settingsFile())).toBe(false);
+  });
+
+  test("a Node under a version manager gets a warning at install and in doctor", async () => {
+    expect(versionManagerOf("/Users/me/.nvm/versions/node/v24.0.0/bin/node")).toBe("nvm");
+    expect(
+      versionManagerOf("/Users/me/.local/share/fnm/node-versions/v24/installation/bin/node"),
+    ).toBe("fnm");
+    expect(versionManagerOf("/opt/homebrew/Cellar/node/25.1.0/bin/node")).toBe("Cellar");
+    expect(versionManagerOf("C:\\Users\\me\\AppData\\Roaming\\nvm\\v24.0.0\\node.exe")).toBe("nvm");
+    expect(versionManagerOf("/usr/local/bin/node")).toBeUndefined();
+    expect(versionManagerOf("/home/me/.volta/tools/image/node/24/bin/node")).toBe("volta");
+    expect(versionManagerOf("/home/me/.asdf/installs/nodejs/24/bin/node")).toBe("asdf");
+
+    const node = write(path.join(box.dir, ".nvm", "versions", "node", "v24", "bin", "node"), "x");
+    const main = path.join(box.dir, "bin", "main.js");
+    const m = make({ command: [node, main] });
+    const report = await m.adapter.install({ home: box.home });
+    expect(report.warnings?.join("\n")).toMatch(/nvm.*silently disables/s);
+    const doctor = await m.adapter.doctor(box.home);
+    const hooks = doctor.checks.find((c) => c.name === "hooks");
+    expect(hooks).toMatchObject({ ok: true, warning: expect.stringContaining("nvm") });
+    expect(doctor.ok).toBe(true);
+
+    const plain = await make({ command: ["/usr/local/bin/node", main] }).adapter.install({
+      home: box.home,
+    });
+    expect(plain.warnings).toEqual([]);
   });
 
   const ORIGINALS: Record<string, string> = {
@@ -473,7 +637,7 @@ describe("install and uninstall", () => {
     expect(fs.existsSync(settingsFile())).toBe(false);
     expect(await m.adapter.detect(box.home)).toBe(true);
     await m.adapter.uninstall(box.home);
-    expect(parseJsonc(read(path.join(cfg, "settings.json")))).toEqual({});
+    expect(fs.existsSync(path.join(cfg, "settings.json"))).toBe(false);
   });
 
   test("detect: a home without Claude is not detected", async () => {

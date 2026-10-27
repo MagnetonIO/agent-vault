@@ -1,53 +1,45 @@
+import { type HookOutput, OVERSIZE_REASON } from "@agent-vault/adapters";
 import { type Command, Option } from "commander";
 import { adapterFor } from "../harness.js";
+import { readHookInput } from "../hook-input.js";
 import { warn } from "../output.js";
-
-/** A prompt larger than this is let through unread: nobody pastes a key into 8 MiB. */
-export const STDIN_CAP_BYTES = 8 * 1024 * 1024;
-
-/** All of `stream` as text, or null if it holds more than `cap` bytes. */
-export async function readCapped(
-  stream: AsyncIterable<Buffer | string>,
-  cap = STDIN_CAP_BYTES,
-): Promise<string | null> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of stream) {
-    const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-    size += buf.length;
-    if (size > cap) return null;
-    chunks.push(buf);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
 
 /**
  * One hook event: the harness's JSON on stdin, its answer on stdout, exit 0. Nothing but that
  * JSON goes to stdout, and nothing here throws: a hook that fails must let the prompt through.
- * (A prompt that holds a key is blocked inside the adapter, which fails closed on its own.)
+ * (A prompt that holds a key is blocked inside the adapter, which fails closed on its own. A
+ * prompt too large to read cannot be checked, so it is blocked here too.)
  */
 export async function runHook(
   harness: string,
   event: string,
   opts: { probe?: boolean | undefined },
-  stdin: AsyncIterable<Buffer | string> & { isTTY?: boolean },
+  stdin: Parameters<typeof readHookInput>[0],
 ): Promise<void> {
   try {
     if (stdin.isTTY) return;
-    const raw = await readCapped(stdin);
-    if (raw === null || raw.trim() === "") return;
-    let input: unknown;
+    const input = await readHookInput(stdin);
+    const adapter = adapterFor(harness);
+    if (input.oversize) {
+      if (event === "prompt-submit") print(adapter.blockOutput(OVERSIZE_REASON));
+      return;
+    }
+    if (input.raw.trim() === "") return;
+    let parsed: unknown;
     try {
-      input = JSON.parse(raw);
+      parsed = JSON.parse(input.raw);
     } catch {
       return;
     }
-    const out = await adapterFor(harness).handleHook(event, input, { probe: opts.probe === true });
-    if (out !== null) process.stdout.write(`${JSON.stringify(out)}\n`);
+    print(await adapter.handleHook(event, parsed, { probe: opts.probe === true }));
   } catch (err) {
     warn(`agent-vault hook: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
+
+const print = (out: HookOutput): void => {
+  if (out !== null) process.stdout.write(`${JSON.stringify(out)}\n`);
+};
 
 export function hookCommand(program: Command): void {
   program

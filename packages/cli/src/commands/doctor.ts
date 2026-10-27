@@ -22,6 +22,7 @@ export function doctorCommand(program: Command): void {
               : "ok  ";
         say(`${label}  ${c.name.padEnd(width)}  ${c.detail}`);
         if ((!c.ok || c.severity === "warn") && c.fix) say(`      fix: ${c.fix}`);
+        if (c.warning) say(`      WARNING: ${c.warning}`);
       }
       const bad = report.checks.filter((c) => !c.ok).length;
       say(
