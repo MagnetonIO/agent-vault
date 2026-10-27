@@ -12,7 +12,7 @@ import {
 } from "@agent-vault/core";
 import { deviceId, HARNESSES, type Harness } from "../device.js";
 import { SecretNotTextError } from "../errors.js";
-import { type FileProblem, scrubFiles } from "../scrubber.js";
+import { type FileProblem, type ScrubOptions, scrubFiles } from "../scrubber.js";
 import { decodeSecretText } from "../secret-text.js";
 import { invalid, isValidName, paramsObject } from "./params.js";
 import type { Registry } from "./types.js";
@@ -131,7 +131,7 @@ function auditScrubbed(vault: Vault, harness: Harness, names: string[]): void {
   }
 }
 
-async function runQueue(vault: Vault, harness: Harness) {
+async function runQueue(vault: Vault, harness: Harness, scrubOpts: ScrubOptions) {
   const rows = listScrubQueue(vault, harness);
   const byFile = new Map<string, ScrubRow[]>();
   for (const row of rows) byFile.set(row.file, [...(byFile.get(row.file) ?? []), row]);
@@ -152,6 +152,7 @@ async function runQueue(vault: Vault, harness: Harness) {
         const result = await scrubFiles(
           [file],
           names.map((name) => ({ value: values.get(name) as string, ref: name })),
+          scrubOpts,
         );
         filesChanged += result.filesChanged;
         replacements += result.replacements;
@@ -184,7 +185,8 @@ async function runQueue(vault: Vault, harness: Harness) {
   };
 }
 
-export const scrubMethods: Registry = {
+/** The `scrub.*` methods. `scrubOpts` lets tests fail the rename or pose as Windows. */
+export const createScrubMethods = (scrubOpts: ScrubOptions = {}): Registry => ({
   "scrub.queue": {
     mutates: true,
     returnsSecret: false,
@@ -214,7 +216,9 @@ export const scrubMethods: Registry = {
     handler: (ctx, params) => {
       const harness = reqHarness(paramsObject(params, ["harness"]));
       const vault = ctx.vault();
-      return exclusive(vault, () => runQueue(vault, harness));
+      return exclusive(vault, () => runQueue(vault, harness, scrubOpts));
     },
   },
-};
+});
+
+export const scrubMethods: Registry = createScrubMethods();

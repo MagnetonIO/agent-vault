@@ -1,18 +1,26 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { createRedactor } from "@agent-vault/detect";
+import { createBlockScrubber, JsonCorruptionError, REF_PREFIX } from "./scrub-text.js";
 
 /** How much of a file is read, redacted and written at a time. */
 const CHUNK_BYTES = 64 * 1024;
 /** The gap between the size checks that decide the file has stopped growing. */
 const STABLE_CHECK_MS = 50;
 const MAX_STABLE_LOOPS = 20;
+/** How many times the final size check may find more bytes and send the scrub back to reading. */
+const MAX_FINAL_ROUNDS = 5;
+/** A line longer than this (in characters) is not held in memory: the file fails. */
+const MAX_LINE_CHARS = 64 * 1024 * 1024;
+/** A leftover `.av-scrub-*` temp file is deleted when its process is gone or it is this old. */
+const STALE_TEMP_MS = 10 * 60_000;
+/** Creating the temp file failed because the directory refuses it: retrying will not help. */
+const UNWRITABLE_CODES: ReadonlySet<string> = new Set(["EACCES", "EPERM", "EROFS"]);
 /** Windows refuses to replace a file another process has open; try again for a moment. */
 const RENAME_ATTEMPTS = 5;
 const RENAME_BACKOFF_MS = 100;
 const RENAME_RETRY_CODES: ReadonlySet<string> = new Set(["EPERM", "EBUSY", "EACCES"]);
-const REF_PREFIX = "vault://";
 
 export type Replacement = {
   /** The secret as the user typed it. */
@@ -27,9 +35,9 @@ export type ScrubResult = {
   filesChanged: number;
   /** Redactions made in the files that were rewritten. */
   replacements: number;
-  /** Files that were deliberately not touched (symlink, not a regular file, not UTF-8). */
+  /** Files that were deliberately not touched (symlink, hard link, not a regular file, not UTF-8, directory not writable). */
   skipped: FileProblem[];
-  /** Files that should be tried again later (rename refused, kept growing, I/O error). */
+  /** Files that should be tried again later (rename refused, kept growing, line too large, I/O error). */
   failed: FileProblem[];
 };
 
@@ -38,6 +46,8 @@ export type ScrubOptions = {
   rename?: (from: string, to: string) => Promise<void>;
   /** Replaces `process.platform`; only `win32` retries a refused rename. */
   platform?: NodeJS.Platform;
+  /** Runs after the data is synced and before the last size check; tests append to the file here. */
+  beforeFinalCheck?: () => void | Promise<void>;
 };
 
 type Outcome =
@@ -78,10 +88,48 @@ class Stop extends Error {
   }
 }
 
+const pidAlive = (pid: number): boolean => {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return errCode(err) === "EPERM"; // it exists, we just may not signal it
+  }
+};
+
+/** Delete `<file>.av-scrub-*` temp files a crashed scrub left behind. */
+async function removeStaleTemps(file: string): Promise<void> {
+  const dir = path.dirname(file);
+  const prefix = `${path.basename(file)}.av-scrub-`;
+  let names: string[];
+  try {
+    names = await fs.promises.readdir(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const match = name.startsWith(prefix)
+      ? /^(\d+)-[0-9a-f]{8}$/.exec(name.slice(prefix.length))
+      : null;
+    if (!match) continue;
+    const leftover = path.join(dir, name);
+    try {
+      const st = await fs.promises.lstat(leftover);
+      if (!st.isFile()) continue;
+      if (!pidAlive(Number(match[1])) || Date.now() - st.mtimeMs > STALE_TEMP_MS) {
+        await fs.promises.rm(leftover, { force: true });
+      }
+    } catch {
+      // gone already, or not ours to delete: leave it
+    }
+  }
+}
+
 async function scrubOne(
   file: string,
   secrets: { name: string; value: string }[],
-  { rename = fs.promises.rename, platform = process.platform }: ScrubOptions,
+  { rename = fs.promises.rename, platform = process.platform, beforeFinalCheck }: ScrubOptions,
 ): Promise<Outcome> {
   let linkStat: fs.Stats;
   try {
@@ -91,6 +139,9 @@ async function scrubOne(
   }
   if (linkStat.isSymbolicLink()) return { kind: "skipped", reason: "symlink" };
   if (!linkStat.isFile()) return { kind: "skipped", reason: "not a regular file" };
+  // A rename would silently break the link: the other names would keep the old, unscrubbed file.
+  if (linkStat.nlink > 1) return { kind: "skipped", reason: "hard link" };
+  await removeStaleTemps(file);
 
   let src: fs.promises.FileHandle | undefined;
   let out: fs.promises.FileHandle | undefined;
@@ -102,31 +153,56 @@ async function scrubOne(
     } catch (err) {
       return isGone(err) ? { kind: "missing" } : { kind: "failed", reason: errCode(err) };
     }
-    const opened = await src.stat();
+    const source = src;
+    const opened = await source.stat();
     // The path could have been swapped for something else between `lstat` and `open`.
     if (!opened.isFile() || (platform !== "win32" && opened.ino !== linkStat.ino)) {
       return { kind: "skipped", reason: "not a regular file" };
     }
-    out = await fs.promises.open(tmp, "wx", opened.mode & 0o777);
+    try {
+      out = await fs.promises.open(tmp, "wx", opened.mode & 0o777);
+    } catch (err) {
+      if (UNWRITABLE_CODES.has(errCode(err))) {
+        return { kind: "skipped", reason: "directory is not writable" };
+      }
+      throw err;
+    }
+    const sink = out;
 
     const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-    const redactor = createRedactor(secrets, { marker: (name) => `${REF_PREFIX}${name}` });
+    const scrubber = createBlockScrubber(secrets);
     const buf = Buffer.allocUnsafe(CHUNK_BYTES);
     let offset = 0;
+    /** Text read but not yet scrubbed: a partial last line, or lines that may start a multi-line secret. */
+    let pending = "";
 
-    const push = async (text: string): Promise<void> => {
-      const redacted = redactor.push(text);
-      if (redacted !== "") await out?.writeFile(redacted);
+    const handle = async (text: string, final: boolean): Promise<void> => {
+      let cut: number;
+      if (final) cut = pending.length + text.length;
+      else {
+        const newline = text.lastIndexOf("\n");
+        if (newline === -1) {
+          pending += text;
+          if (pending.length > MAX_LINE_CHARS) {
+            throw new Stop({ kind: "failed", reason: "line too large" });
+          }
+          return;
+        }
+        cut = pending.length + newline + 1;
+      }
+      const all = pending + text;
+      if (!final) cut = scrubber.holdFrom(all, cut);
+      pending = all.slice(cut);
+      if (pending.length > MAX_LINE_CHARS)
+        throw new Stop({ kind: "failed", reason: "line too large" });
+      if (cut === 0) return;
+      const scrubbed = scrubber.scrubBlock(all.slice(0, cut));
+      if (scrubbed !== "") await sink.writeFile(scrubbed);
     };
-    /** Stream everything from `offset` to the current end of the file through the redactor. */
+    /** Stream everything from `offset` to the current end of the file through the scrubber. */
     const pump = async (): Promise<void> => {
       for (;;) {
-        const { bytesRead } = await (src as fs.promises.FileHandle).read(
-          buf,
-          0,
-          CHUNK_BYTES,
-          offset,
-        );
+        const { bytesRead } = await source.read(buf, 0, CHUNK_BYTES, offset);
         if (bytesRead === 0) return;
         offset += bytesRead;
         let text: string;
@@ -135,48 +211,60 @@ async function scrubOne(
         } catch {
           throw new Stop({ kind: "skipped", reason: "not valid UTF-8" });
         }
-        await push(text);
+        await handle(text, false);
       }
     };
+    /** Read until the size has not moved for one check STABLE_CHECK_MS after the last EOF. */
+    const readUntilStable = async (): Promise<fs.Stats> => {
+      await pump();
+      let last = opened;
+      for (let loop = 0; loop < MAX_STABLE_LOOPS; loop++) {
+        await sleep(STABLE_CHECK_MS);
+        last = await source.stat();
+        if (last.size < offset) throw new Stop({ kind: "failed", reason: "file was truncated" });
+        if (last.size === offset) return last;
+        await pump();
+      }
+      throw new Stop({ kind: "failed", reason: "file kept growing" });
+    };
+    /** Scrub what is still pending as if the file ended here. */
+    const finish = async (): Promise<void> => {
+      let rest: string;
+      try {
+        rest = decoder.decode();
+      } catch {
+        // Half a character at the end: a writer is probably mid-write. Try again later.
+        throw new Stop({ kind: "failed", reason: "file ends inside a character" });
+      }
+      await handle(rest, true);
+    };
 
-    // Append safety (Review Focus 3): the harness may still be writing. Keep reading until the
-    // size has not moved for one check STABLE_CHECK_MS after the last EOF, then swap the files.
-    await pump();
-    let stable = false;
+    // Append safety (Review Focus 3): the harness may still be writing. Read until the size is
+    // stable, finish and fsync, then look once more: bytes that arrived meanwhile send us back.
     let last = opened;
-    for (let loop = 0; loop < MAX_STABLE_LOOPS && !stable; loop++) {
-      await sleep(STABLE_CHECK_MS);
-      last = await src.stat();
-      if (last.size < offset) throw new Stop({ kind: "failed", reason: "file was truncated" });
-      if (last.size === offset) stable = true;
-      else await pump();
+    for (let round = 0; ; round++) {
+      last = await readUntilStable();
+      await finish();
+      if (scrubber.matchCount() === 0) return { kind: "clean" };
+      await sink.sync();
+      await beforeFinalCheck?.();
+      if ((await source.stat()).size === offset) break;
+      if (round + 1 >= MAX_FINAL_ROUNDS)
+        throw new Stop({ kind: "failed", reason: "file kept growing" });
     }
-    if (!stable) throw new Stop({ kind: "failed", reason: "file kept growing" });
-
-    let rest: string;
-    try {
-      rest = decoder.decode(); // a file that ends inside a multi-byte character throws here
-    } catch {
-      throw new Stop({ kind: "skipped", reason: "not valid UTF-8" });
-    }
-    await push(rest);
-    const tail = redactor.flush();
-    if (tail !== "") await out.writeFile(tail);
-    const replacements = redactor.matchCount();
-    if (replacements === 0) return { kind: "clean" };
+    const replacements = scrubber.matchCount();
 
     // Same permissions and modification time, so the harness's session list does not reorder.
-    await out.chmod(opened.mode & 0o777);
-    await out.utimes(last.atime, last.mtime);
-    await out.sync();
-    await out.close();
+    await sink.chmod(opened.mode & 0o777);
+    await sink.utimes(last.atime, (await source.stat()).mtime);
+    await sink.close();
     out = undefined;
-    await src.close();
+    await source.close();
     src = undefined;
 
-    // Accepted window: a line appended after the last size check and before this rename goes to
-    // the old inode and is lost. The harnesses append open-write-close per line (S3), so the
-    // window is the few microseconds between the check and the rename.
+    // Accepted window: a line appended after the size check above and before this rename goes to
+    // the old inode and is lost. The check, the two closes and the rename take milliseconds, and
+    // the harnesses append open-write-close per line (S3), so a loss needs a line to land there.
     try {
       await renameWithRetry(rename, tmp, file, platform === "win32");
     } catch (err) {
@@ -186,6 +274,7 @@ async function scrubOne(
     return { kind: "changed", replacements };
   } catch (err) {
     if (err instanceof Stop) return err.outcome;
+    if (err instanceof JsonCorruptionError) return { kind: "failed", reason: err.message };
     return isGone(err) ? { kind: "missing" } : { kind: "failed", reason: errCode(err) };
   } finally {
     await out?.close().catch(() => {});

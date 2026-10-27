@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { createRedactor } from "../src/index.js";
+import { createRedactor, secretForms } from "../src/index.js";
 import { ALNUM, fakes } from "./fixtures/fake-keys.js";
 
 const run = (secrets: { name: string; value: string }[], chunks: string[]): string => {
@@ -410,6 +410,20 @@ describe("redactor", () => {
       const json = JSON.stringify({ blob: wrapped });
       const r = createRedactor([{ name: "w", value: secret }], { marker: (n) => `vault://${n}` });
       expect(r.push(json) + r.flush()).toBe('{"blob":"vault://w"}');
+    });
+  });
+
+  describe("short values with JSON-special characters", () => {
+    test("a short value with a quote is redacted in its escaped form too", () => {
+      const r = createRedactor([{ name: "q", value: 'ab"cd' }], { marker: (n) => `<${n}>` });
+      expect(r.push('{"k":"ab\\"cd","j":"ab"cd"}') + r.flush()).toBe('{"k":"<q>","j":"<q>"}');
+    });
+
+    test("secretForms lists the raw, encoded and escaped forms", () => {
+      const forms = secretForms('pa"ss\\word123');
+      expect(forms).toContain('pa"ss\\word123');
+      expect(forms).toContain('pa\\"ss\\\\word123');
+      expect(secretForms("ab")).toEqual(["ab"]);
     });
   });
 });

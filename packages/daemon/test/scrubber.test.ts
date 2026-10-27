@@ -1,8 +1,11 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { RpcError } from "../src/errors.js";
+import { registry } from "../src/methods/index.js";
+import { createScrubMethods } from "../src/methods/scrub.js";
 import { scrubFiles } from "../src/scrubber.js";
 import { b64, useDaemon } from "./helpers.js";
 
@@ -235,6 +238,25 @@ describe("scrubFiles", () => {
     }, 60_000);
   });
 
+  test("a writer appending every 20 ms loses nothing", async () => {
+    const file = write("slow.jsonl", jsonl({ text: SECRET }, { text: "x" }));
+    let n = 0;
+    const writer = new Promise<void>((resolve) => {
+      const tick = () => {
+        fs.appendFileSync(file, `${JSON.stringify({ type: "late", n, text: SECRET })}\n`);
+        if (++n < 25) setTimeout(tick, 20);
+        else resolve();
+      };
+      setTimeout(tick, 5);
+    });
+    const result = await scrubFiles([file], R);
+    await writer;
+    expect(result.failed).toEqual([]);
+    expect(result.replacements).toBe(26);
+    expect(fs.readFileSync(file, "utf8")).not.toContain(SECRET);
+    expect(parseLines(file)).toHaveLength(27);
+  });
+
   describe("rename failure", () => {
     const busy = (code: string) => Object.assign(new Error(`${code}: busy`), { code });
 
@@ -286,6 +308,264 @@ describe("scrubFiles", () => {
       expect(result.failed).toEqual([{ file, reason: "EPERM" }]);
       expect(leftovers()).toEqual([]);
     });
+  });
+});
+
+describe("JSON-aware scrubbing", () => {
+  /** Scrub one line of JSON for `secret` and return the file text. */
+  const scrubLine = async (line: string, secret: string, name = "s/x"): Promise<string> => {
+    const file = write("j.jsonl", `${line}\n`);
+    await scrubFiles([file], [{ value: secret, ref: name }]);
+    return fs.readFileSync(file, "utf8");
+  };
+
+  test.each([
+    ["a number that contains it", "1234", '{"input_tokens":12345,"n":"ok"}'],
+    ["a date-like number", "20261027", '{"day":20261027,"t":"x"}'],
+    ["null", "null", '{"a":null,"b":"x"}'],
+    ["true followed by a quote and comma", 'true",', '{"a":true,"b":"x"}'],
+    ["structure with quotes", '","a":1', '{"x":"y","a":1}'],
+    ["a name whose first letter is part of an escape", "nimbus2024", '{"t":"a\\nimbus2024"}'],
+  ])("%s: the line is left byte-identical and valid", async (_label, secret, line) => {
+    expect(await scrubLine(line, secret)).toBe(`${line}\n`);
+  });
+
+  test("the same secrets are still replaced inside string values", async () => {
+    const out = await scrubLine('{"input_tokens":12345,"note":"pin 1234 here"}', "1234");
+    expect(JSON.parse(out)).toEqual({ input_tokens: 12345, note: "pin vault://s/x here" });
+    expect(out.startsWith('{"input_tokens":12345,')).toBe(true);
+  });
+
+  test("a secret called type: keys are unchanged, only string values change", async () => {
+    const out = await scrubLine('{"type":"type","k":{"type":"a type of x"}}', "type");
+    expect(JSON.parse(out)).toEqual({
+      type: "vault://s/x",
+      k: { type: "a vault://s/x of x" },
+    });
+  });
+
+  test("a secret that is a key name leaves the key alone", async () => {
+    const out = await scrubLine('{"password":"password"}', "password");
+    expect(JSON.parse(out)).toEqual({ password: "vault://s/x" });
+  });
+
+  test("a PEM at double depth (a JSON file printed inside a JSON string)", async () => {
+    const pem =
+      "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nKgwggSkAgEAAoIBAQC7\n-----END PRIVATE KEY-----\n";
+    const inner = JSON.stringify({ private_key: pem, client_email: "a@b.c" });
+    const out = await scrubLine(
+      JSON.stringify({ tool_result: `cat key.json\n${inner}` }),
+      pem,
+      "pem/k",
+    );
+    expect(out).not.toContain("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC");
+    const decoded = (JSON.parse(out) as { tool_result: string }).tool_result;
+    expect(JSON.parse(decoded.split("\n").slice(1).join("\n"))).toEqual({
+      private_key: "vault://pem/k",
+      client_email: "a@b.c",
+    });
+  });
+
+  test("a secret with a quote and a backslash at double depth", async () => {
+    const secret = 'pa"ss\\word123';
+    const inner = JSON.stringify({ pw: secret });
+    const line = JSON.stringify({ out: inner, again: { raw: secret } });
+    expect(line).toContain('pa\\\\\\"ss\\\\\\\\word123');
+    const out = await scrubLine(line, secret, "pw/x");
+    expect(out).not.toContain("word123");
+    const parsed = JSON.parse(out) as { out: string; again: { raw: string } };
+    expect(JSON.parse(parsed.out)).toEqual({ pw: "vault://pw/x" });
+    expect(parsed.again.raw).toBe("vault://pw/x");
+  });
+
+  test("wrapped base64 in nested JSON", async () => {
+    const long = `${SECRET}${SECRET}${SECRET}`;
+    const wrapped = Buffer.from(long)
+      .toString("base64")
+      .replace(/(.{76})/g, "$1\n");
+    const line = `{"a":[{"b":{"blob":${JSON.stringify(wrapped)}}}],"n":1.0,"big":12345678901234567890}`;
+    const file = write("n.jsonl", `${line}\n`);
+    await scrubFiles([file], [{ value: long, ref: REF }]);
+    const text = fs.readFileSync(file, "utf8");
+    expect(text).not.toContain(wrapped.slice(0, 40));
+    // Only the string token changes: numbers keep their exact spelling.
+    expect(text.endsWith('"n":1.0,"big":12345678901234567890}\n')).toBe(true);
+    expect(JSON.parse(text).a[0].b.blob).toBe(REF);
+  });
+
+  test("a short secret with a quote inside JSON", async () => {
+    const out = await scrubLine('{"a":"x ab\\"cd y","b":"ab\\\\\\"cd"}', 'ab"cd');
+    expect(out).not.toContain("cd");
+    expect(JSON.parse(out)).toEqual({ a: "x vault://s/x y", b: "vault://s/x" });
+  });
+
+  test("keeps CRLF, indentation and untouched lines byte-identical", async () => {
+    const lines = [
+      `{"a": 1,   "b": "${SECRET}"}\r\n`,
+      '  {"keep":  "me" , "n": 1.50}\r\n',
+      "plain text line\r\n",
+    ];
+    const file = write("crlf.jsonl", lines.join(""));
+    await scrubFiles([file], R);
+    expect(fs.readFileSync(file, "utf8")).toBe(
+      `{"a": 1,   "b": "${REF}"}\r\n  {"keep":  "me" , "n": 1.50}\r\nplain text line\r\n`,
+    );
+  });
+
+  test("a final line without a newline is scrubbed too", async () => {
+    const file = write("nonl.jsonl", `${jsonl({ a: 1 })}${JSON.stringify({ b: SECRET })}`);
+    await scrubFiles([file], R);
+    expect(fs.readFileSync(file, "utf8")).toBe(`{"a":1}\n{"b":"${REF}"}`);
+  });
+
+  test("a non-JSON text file with the raw secret is still scrubbed", async () => {
+    const file = write(
+      "notes.txt",
+      `line one\nexport TOKEN=${SECRET}\n[section]\nkey = ${SECRET}\n`,
+    );
+    const result = await scrubFiles([file], R);
+    expect(result.replacements).toBe(2);
+    expect(fs.readFileSync(file, "utf8")).toBe(
+      `line one\nexport TOKEN=${REF}\n[section]\nkey = ${REF}\n`,
+    );
+  });
+
+  test("a line that looks like JSON but is not falls back to raw redaction", async () => {
+    const file = write("bad.jsonl", `{"a": "${SECRET}", oops\n${jsonl({ ok: SECRET })}`);
+    await scrubFiles([file], R);
+    const text = fs.readFileSync(file, "utf8");
+    expect(text).not.toContain(SECRET);
+    expect(text.split("\n")[0]).toBe(`{"a": "${REF}", oops`);
+  });
+
+  test("a multi-line raw PEM in a text file is scrubbed, also across a chunk boundary", async () => {
+    const pem = `-----BEGIN KEY-----\n${"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n".repeat(20)}-----END KEY-----\n`;
+    for (const gap of [0, 100, 64 * 1024 - 200, 64 * 1024 - 5, 64 * 1024 - 1]) {
+      const filler = "x".repeat(Math.max(0, gap - 1));
+      const file = write(`pem-${gap}.txt`, `${filler}\n${pem}tail\n`);
+      const result = await scrubFiles([file], [{ value: pem, ref: "vault://pem/k" }]);
+      expect(result.replacements, `gap ${gap}`).toBe(1);
+      expect(fs.readFileSync(file, "utf8")).toBe(`${filler}\nvault://pem/ktail\n`);
+    }
+  });
+
+  test("a line over 64 MiB fails the file and leaves it as it was", async () => {
+    const file = path.join(dir, "huge.txt");
+    const fd = fs.openSync(file, "w");
+    const block = Buffer.alloc(1024 * 1024, "a");
+    for (let i = 0; i < 65; i++) fs.writeSync(fd, block);
+    fs.writeSync(fd, `${SECRET}\n`);
+    fs.closeSync(fd);
+    const before = fs.statSync(file);
+    const result = await scrubFiles([file], R);
+    expect(result.failed).toEqual([{ file, reason: "line too large" }]);
+    expect(fs.statSync(file).ino).toBe(before.ino);
+    expect(leftovers()).toEqual([]);
+  }, 30_000);
+
+  test("a 200 MB file with no match is untouched and quick", async () => {
+    const file = path.join(dir, "big-clean.jsonl");
+    const line = `${JSON.stringify({ type: "assistant", text: "y".repeat(180) })}\n`;
+    const block = Buffer.from(line.repeat(5000));
+    const fd = fs.openSync(file, "w");
+    let written = 0;
+    while (written < 200 * 1024 * 1024) written += fs.writeSync(fd, block);
+    fs.closeSync(fd);
+    const old = new Date("2020-01-02T03:04:05Z");
+    fs.utimesSync(file, old, old);
+    const before = fs.statSync(file);
+    const t0 = performance.now();
+    const result = await scrubFiles([file], R);
+    const ms = performance.now() - t0;
+    expect(result).toEqual({ filesChanged: 0, replacements: 0, skipped: [], failed: [] });
+    const after = fs.statSync(file);
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(ms).toBeLessThan(process.env.CI ? 20_000 : 2_000);
+    expect(leftovers()).toEqual([]);
+  }, 60_000);
+});
+
+describe("file hazards", () => {
+  test("a leftover temp file from a dead process is removed; a live recent one is kept", async () => {
+    const file = write("t.jsonl", jsonl({ text: SECRET }));
+    const dead = spawnSync(process.execPath, ["-e", ""]);
+    expect(dead.pid).toBeGreaterThan(0);
+    const stale = `${file}.av-scrub-${dead.pid}-deadbeef`;
+    const mine = `${file}.av-scrub-${process.pid}-cafef00d`;
+    const other = path.join(dir, "other.jsonl.av-scrub-1-aaaaaaaa");
+    const unrelated = `${file}.av-scrub-notapid`;
+    for (const f of [stale, mine, other, unrelated]) fs.writeFileSync(f, "x");
+    await scrubFiles([file], R);
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(mine)).toBe(true);
+    expect(fs.existsSync(other)).toBe(true);
+    expect(fs.existsSync(unrelated)).toBe(true);
+  });
+
+  test("a temp file older than 10 minutes is removed even if its pid is alive", async () => {
+    const file = write("t.jsonl", jsonl({ text: "nothing" }));
+    const old = `${file}.av-scrub-${process.pid}-01df11e5`;
+    fs.writeFileSync(old, "x");
+    const longAgo = new Date(Date.now() - 11 * 60_000);
+    fs.utimesSync(old, longAgo, longAgo);
+    await scrubFiles([file], R);
+    expect(fs.existsSync(old)).toBe(false);
+  });
+
+  test("a hard-linked file is skipped and the link survives", async () => {
+    const file = write("a.jsonl", jsonl({ text: SECRET }));
+    const twin = path.join(dir, "b.jsonl");
+    fs.linkSync(file, twin);
+    const result = await scrubFiles([file], R);
+    expect(result.skipped).toEqual([{ file, reason: "hard link" }]);
+    expect(result.filesChanged).toBe(0);
+    expect(fs.statSync(file).nlink).toBe(2);
+    expect(fs.readFileSync(twin, "utf8")).toContain(SECRET);
+    expect(leftovers()).toEqual([]);
+  });
+
+  test("a directory that cannot be written to is a permanent skip", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const sub = path.join(dir, "ro");
+    fs.mkdirSync(sub);
+    const file = path.join(sub, "r.jsonl");
+    fs.writeFileSync(file, jsonl({ text: SECRET }));
+    fs.chmodSync(sub, 0o555);
+    try {
+      const result = await scrubFiles([file], R);
+      expect(result.skipped).toEqual([{ file, reason: "directory is not writable" }]);
+      expect(result.failed).toEqual([]);
+    } finally {
+      fs.chmodSync(sub, 0o755);
+    }
+  });
+
+  test("a file that ends in half a UTF-8 character is retried, not skipped", async () => {
+    const file = path.join(dir, "half.jsonl");
+    fs.writeFileSync(
+      file,
+      Buffer.concat([Buffer.from(jsonl({ text: SECRET })), Buffer.from([0xc3])]),
+    );
+    const result = await scrubFiles([file], R);
+    expect(result.failed).toEqual([{ file, reason: "file ends inside a character" }]);
+    expect(result.skipped).toEqual([]);
+  });
+
+  test("appends after the final size check but before the rename are caught", async () => {
+    const file = write("late.jsonl", jsonl({ text: SECRET }));
+    let appended = false;
+    const result = await scrubFiles([file], R, {
+      // The hook runs after the first fsync and before the last size check.
+      beforeFinalCheck: () => {
+        if (appended) return;
+        appended = true;
+        fs.appendFileSync(file, `${JSON.stringify({ late: SECRET })}\n`);
+      },
+    });
+    expect(result.replacements).toBe(2);
+    expect(fs.readFileSync(file, "utf8")).not.toContain(SECRET);
+    expect(parseLines(file)).toHaveLength(2);
   });
 });
 
@@ -489,7 +769,7 @@ describe("scrub.queue and scrub.run", () => {
     });
   });
 
-  test("a row whose file cannot be rewritten stays queued", async () => {
+  test("a file in a directory that cannot be written is skipped and its row dropped", async () => {
     if (process.platform === "win32" || process.getuid?.() === 0) return; // needs a read-only dir
     await put("api/key", SECRET);
     const file = homeFile("ro.jsonl", jsonl({ text: SECRET }));
@@ -498,13 +778,13 @@ describe("scrub.queue and scrub.run", () => {
     fs.chmodSync(dirPath, 0o555);
     try {
       const result = await run();
-      expect(result).toMatchObject({ filesChanged: 0, remaining: 1 });
-      expect(result.failed).toEqual([{ file: path.resolve(file), reason: "EACCES" }]);
+      expect(result).toMatchObject({ filesChanged: 0, failed: [], remaining: 0 });
+      expect(result.skipped).toEqual([
+        { file: path.resolve(file), reason: "directory is not writable" },
+      ]);
     } finally {
       fs.chmodSync(dirPath, 0o755);
     }
-    expect(await run()).toMatchObject({ filesChanged: 1, replacements: 1, remaining: 0 });
-    expect(fs.readFileSync(file, "utf8")).not.toContain(SECRET);
   });
 
   test("only the named harness's rows run", async () => {
@@ -518,4 +798,53 @@ describe("scrub.queue and scrub.run", () => {
     expect(fs.readFileSync(file, "utf8")).toContain(SECRET);
     expect(await run()).toMatchObject({ filesChanged: 1 });
   });
+});
+
+describe("scrub.run when the rename keeps failing", () => {
+  const busy = Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+  const env = useDaemon("tcp", {
+    init: true,
+    methods: Object.freeze({
+      ...registry,
+      ...createScrubMethods({
+        platform: "win32",
+        rename: async () => {
+          throw busy;
+        },
+      }),
+    }),
+  });
+  let home: string;
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "avh-"));
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+  });
+  afterEach(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  test("the row stays queued, the file is unchanged and no temp file is left", async () => {
+    await env.client.call("secret.put", { name: "api/key", valueB64: b64(SECRET) });
+    const file = path.join(home, "t.jsonl");
+    fs.writeFileSync(file, jsonl({ text: SECRET }));
+    await env.client.call("scrub.queue", {
+      harness: "claude-code",
+      files: [file],
+      secretNames: ["api/key"],
+    });
+    const result = await env.client.call<{ failed: unknown[]; remaining: number }>("scrub.run", {
+      harness: "claude-code",
+    });
+    expect(result).toMatchObject({ filesChanged: 0, remaining: 1 });
+    expect(result.failed).toEqual([{ file: path.resolve(file), reason: "EBUSY" }]);
+    expect(fs.readFileSync(file, "utf8")).toContain(SECRET);
+    expect(fs.readdirSync(home)).toEqual(["t.jsonl"]);
+  }, 10_000);
 });

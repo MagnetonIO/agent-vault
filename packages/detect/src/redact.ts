@@ -40,7 +40,9 @@ const wrap = (text: string, columns: number, lineBreak: string): string => {
  * stores a multi-line copy.
  */
 function variantsOf(value: string): string[] {
-  if (value.length < MIN_ENCODED_LENGTH) return [value];
+  // A short value still shows up escaped when it holds a quote, a backslash or a control char.
+  if (value.length < MIN_ENCODED_LENGTH)
+    return [...new Set([value, JSON.stringify(value).slice(1, -1)])];
   const bytes = Buffer.from(value, "utf8");
   const base64 = bytes.toString("base64");
   const urlencoded = encodeURIComponent(value);
@@ -60,6 +62,9 @@ function variantsOf(value: string): string[] {
     .map((form) => JSON.stringify(form).slice(1, -1));
   return [...new Set([...forms, ...escaped])];
 }
+
+/** Every text `value` is redacted in (see `variantsOf`). The scrubber uses them to pre-screen text. */
+export const secretForms = variantsOf;
 
 const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
 
