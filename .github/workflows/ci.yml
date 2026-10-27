@@ -13,6 +13,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
+    env:
+      # Opt in to the platform package's real OS-keyring round trip (a throwaway account, deleted
+      # afterwards). It only runs on CI runners: macOS login Keychain, Windows Credential Manager,
+      # and on Linux the gnome-keyring below. Never set this on a developer machine.
+      AGENT_VAULT_TEST_REAL_KEYRING: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -24,4 +29,18 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm lint
-      - run: pnpm test
+      - name: test
+        if: runner.os != 'Linux'
+        run: pnpm test
+      # Linux needs a Secret Service on a session bus (Spike S1). The keyring password MUST be
+      # non-empty: with an empty one no usable default collection appears and every call fails
+      # with "Secret Service: no result found". Tests must run inside the same dbus-run-session.
+      - name: test (Linux, Secret Service)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring dbus-x11
+          dbus-run-session -- sh -c '
+            echo -n "ci-keyring-pass" | gnome-keyring-daemon --unlock --components=secrets
+            pnpm test
+          '
