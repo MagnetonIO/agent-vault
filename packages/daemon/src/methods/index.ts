@@ -1,5 +1,6 @@
 import { auditMethods } from "./audit.js";
 import { bundleMethods } from "./bundle.js";
+import { captureMethods } from "./capture.js";
 import { secretMethods } from "./secret.js";
 import type { Registry } from "./types.js";
 import { vaultMethods } from "./vault.js";
@@ -13,6 +14,7 @@ export const registry: Registry = Object.freeze({
   ...secretMethods,
   ...bundleMethods,
   ...auditMethods,
+  ...captureMethods,
 });
 
 export type { Ctx, DaemonState, MethodDef, Registry } from "./types.js";

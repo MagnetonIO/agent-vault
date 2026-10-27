@@ -10,6 +10,7 @@ import {
   type VaultPaths,
 } from "@agent-vault/platform";
 import { afterEach, beforeEach } from "vitest";
+import type { CaptureOptions } from "../src/capture-page.js";
 import { connect, type IpcClient, openChannel } from "../src/client.js";
 import type { Registry } from "../src/methods/index.js";
 import { LineSplitter } from "../src/rpc.js";
@@ -56,7 +57,7 @@ export type DaemonEnv = {
 /** A sandboxed daemon (temp AGENT_VAULT_HOME, MemoryKeyStore) with one client. */
 export function useDaemon(
   mode: Mode,
-  opts: { init?: boolean; methods?: Registry } = {},
+  opts: { init?: boolean; methods?: Registry; capture?: CaptureOptions } = {},
 ): DaemonEnv {
   const env = {} as DaemonEnv;
   const clients: IpcClient[] = [];
@@ -70,6 +71,7 @@ export function useDaemon(
       store: env.store,
       endpoint: env.endpoint,
       methods: opts.methods,
+      capture: opts.capture,
     });
     env.connect = async () => {
       const c = await connect(env.endpoint);

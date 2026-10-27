@@ -1,5 +1,6 @@
 import type { Vault } from "@agent-vault/core";
 import type { RootKeyStore, VaultPaths } from "@agent-vault/platform";
+import type { CaptureService } from "../capture-page.js";
 
 /** What the daemon holds between calls. `vault` is null until `vault.init` has run. */
 export type DaemonState = {
@@ -18,6 +19,8 @@ export type Ctx = {
   readonly paths: VaultPaths;
   readonly store: RootKeyStore;
   readonly state: DaemonState;
+  /** The one-time loopback capture page (Task 11). */
+  readonly capture: CaptureService;
   readonly audit: AuditFields;
   /** The open vault; throws VaultNotInitializedError before `vault.init`. */
   vault(): Vault;

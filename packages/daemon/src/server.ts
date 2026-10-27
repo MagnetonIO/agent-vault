@@ -10,6 +10,7 @@ import {
   type RootKeyStore,
   type VaultPaths,
 } from "@agent-vault/platform";
+import { type CaptureOptions, createCaptureService } from "./capture-page.js";
 import { connect } from "./client.js";
 import { createDispatcher, type Dispatcher } from "./dispatch.js";
 import { DaemonAlreadyRunningError } from "./errors.js";
@@ -42,6 +43,8 @@ export type StartDaemonOptions = {
   endpoint?: IpcEndpoint | undefined;
   /** Replaces the built-in method registry; tests add test-only methods. */
   methods?: Registry | undefined;
+  /** The capture page's clock, TTL and storage; tests replace them. */
+  capture?: CaptureOptions | undefined;
 };
 
 export type DaemonHandle = {
@@ -358,6 +361,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
   // First and synchronous: of several daemons started at once, exactly one gets past this line.
   const releaseLock = acquireLock(paths.runtimeDir);
 
+  const capture = createCaptureService(state, opts.capture);
   const token = endpoint.kind === "tcp" ? randomBytes(32) : null;
   const sockets = new Set<net.Socket>();
   let removeEndpoint: () => void;
@@ -373,6 +377,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
       state,
       paths,
       store,
+      capture,
     });
     const limits = new Limits(token !== null);
     server = net.createServer((socket) => {
@@ -385,6 +390,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
         ? await listenUnix(server, endpoint.path)
         : await listenTcp(server, endpoint, token as Buffer);
   } catch (err) {
+    await capture.close();
     state.vault?.close();
     token?.fill(0);
     releaseLock();
@@ -398,6 +404,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
       const stopped = new Promise<void>((resolve) => server.close(() => resolve()));
       for (const socket of sockets) socket.destroy();
       await stopped;
+      await capture.close();
       state.vault?.close();
       state.vault = null;
       token?.fill(0);

@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-import os from "node:os";
 import {
   AuditEventInvalidError,
   type AuditInput,
@@ -26,6 +24,8 @@ import {
   type VaultPaths,
   WrongPassphraseError,
 } from "@agent-vault/platform";
+import type { CaptureService } from "./capture-page.js";
+import { deviceId, harnessOf } from "./device.js";
 import { RpcError } from "./errors.js";
 import type { Ctx, DaemonState, Registry } from "./methods/index.js";
 import { ERR, type JsonRpcErrorObject } from "./rpc.js";
@@ -55,11 +55,6 @@ const APP_ERRORS: readonly (abstract new (...args: never[]) => Error)[] = [
 /** Before `vault.init` only these work. */
 const WORKS_UNINITIALIZED: ReadonlySet<string> = new Set(["status", "vault.init"]);
 
-const HARNESSES = ["claude-code", "codex", "opencode", "cli", "mcp"] as const;
-type Harness = (typeof HARNESSES)[number];
-
-const deviceId = `dev-${createHash("sha256").update(os.hostname()).digest("hex").slice(0, 12)}`;
-
 /** The wire form of a thrown error. Never a stack, and only the messages of known error classes. */
 export function toErrorObject(err: unknown): JsonRpcErrorObject {
   if (err instanceof RpcError) {
@@ -87,17 +82,15 @@ export type Dispatcher = (
   notify: (method: string, params: unknown) => void,
 ) => Promise<CallResult>;
 
-type Deps = { registry: Registry; state: DaemonState; paths: VaultPaths; store: RootKeyStore };
+type Deps = {
+  registry: Registry;
+  state: DaemonState;
+  paths: VaultPaths;
+  store: RootKeyStore;
+  capture: CaptureService;
+};
 
-function harnessOf(params: unknown): Harness {
-  const h =
-    typeof params === "object" && params !== null && !Array.isArray(params)
-      ? (params as Record<string, unknown>).harness
-      : undefined;
-  return (HARNESSES as readonly unknown[]).includes(h) ? (h as Harness) : "cli";
-}
-
-export function createDispatcher({ registry, state, paths, store }: Deps): Dispatcher {
+export function createDispatcher({ registry, state, paths, store, capture }: Deps): Dispatcher {
   function record(method: string, params: unknown, ctx: Ctx, outcome: AuditInput["outcome"]) {
     if (!state.vault) return;
     appendAudit(state.vault, {
@@ -124,6 +117,7 @@ export function createDispatcher({ registry, state, paths, store }: Deps): Dispa
       paths,
       store,
       state,
+      capture,
       audit: {},
       vault() {
         if (!state.vault) throw new VaultNotInitializedError();

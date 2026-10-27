@@ -46,6 +46,15 @@ export function reqString(p: Params, key: string): string {
   return v;
 }
 
+export function optInt(p: Params, key: string, min: number, max: number): number | undefined {
+  const v = p[key];
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) {
+    throw invalid(key, `must be an integer from ${min} to ${max}`);
+  }
+  return v;
+}
+
 export function optName(p: Params, key: string): string | undefined {
   const v = p[key];
   if (v === undefined) return undefined;

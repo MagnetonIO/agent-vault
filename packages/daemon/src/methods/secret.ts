@@ -1,4 +1,4 @@
-import type { Vault } from "@agent-vault/core";
+import type { SecretMeta, Vault } from "@agent-vault/core";
 import { detectSecrets } from "@agent-vault/detect";
 import { optName, optString, optTags, paramsObject, reqBase64, reqName } from "./params.js";
 import type { Registry } from "./types.js";
@@ -12,6 +12,32 @@ function unnamed(vault: Vault, now = new Date()): string {
   let name = base;
   for (let n = 2; vault.has(name); n++) name = `${base}-${n}`;
   return name;
+}
+
+/**
+ * Store `value`. With no `name`, detect the secret type and suggest a name (or fall back to
+ * `secret/unnamed-<date>`). The one storage path for `secret.put` and the capture page. The
+ * caller owns `value` and zeroes it.
+ */
+export function storeSecret(
+  vault: Vault,
+  input: {
+    name?: string | undefined;
+    value: Buffer;
+    type?: string | undefined;
+    tags?: string[] | undefined;
+  },
+): SecretMeta {
+  let { name, type } = input;
+  if (name === undefined) {
+    const hit = detectSecrets(input.value.toString("utf8"), { isTaken: (n) => vault.has(n) })[0];
+    name = hit ? hit.suggestedName : unnamed(vault);
+    type ??= hit ? hit.ruleId : "generic";
+  }
+  return vault.putSecret(name, input.value, {
+    ...(type !== undefined && { type }),
+    ...(input.tags !== undefined && { tags: input.tags }),
+  });
 }
 
 export const secretMethods: Registry = {
@@ -33,19 +59,10 @@ export const secretMethods: Registry = {
       const tags = optTags(p, "tags");
       const value = reqBase64(p, "valueB64");
       try {
-        const vault = ctx.vault();
-        let name = given;
-        let kind = type;
-        if (name === undefined) {
-          const hit = detectSecrets(value.toString("utf8"), { isTaken: (n) => vault.has(n) })[0];
-          name = hit ? hit.suggestedName : unnamed(vault);
-          kind ??= hit ? hit.ruleId : "generic";
-        }
-        ctx.audit.secretName = name;
-        return vault.putSecret(name, value, {
-          ...(kind !== undefined && { type: kind }),
-          ...(tags !== undefined && { tags }),
-        });
+        ctx.audit.secretName = given; // so a failed put is still logged under its name
+        const meta = storeSecret(ctx.vault(), { name: given, value, type, tags });
+        ctx.audit.secretName = meta.name;
+        return meta;
       } finally {
         value.fill(0);
       }

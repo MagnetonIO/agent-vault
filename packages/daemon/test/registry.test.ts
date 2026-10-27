@@ -1,3 +1,4 @@
+import http from "node:http";
 import { describe, expect, test } from "vitest";
 import { registry } from "../src/methods/index.js";
 import { b64, MODES, useDaemon } from "./helpers.js";
@@ -11,6 +12,8 @@ const READ_PARAMS: Record<string, unknown> = {
   "bundle.list": undefined,
   "audit.query": { limit: 50 },
   "audit.verify": undefined,
+  "capture.begin": {},
+  "capture.wait": { elicitationId: "00000000-0000-4000-8000-000000000000", timeoutMs: 1 },
 };
 
 /** Every encoding of `value` that a leak could take. */
@@ -25,6 +28,36 @@ function forms(value: string): string[] {
     raw.toString("hex"),
     raw.toString("hex").toUpperCase(),
   ];
+}
+
+/** POST the capture form like the page does and return the whole HTTP response as text. */
+function submit(url: string, value: string): Promise<string> {
+  const u = new URL(url);
+  const body = new URLSearchParams({ name: "leak/browser", value }).toString();
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port: u.port,
+        path: u.pathname,
+        method: "POST",
+        agent: false,
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "content-length": Buffer.byteLength(body),
+          origin: u.origin,
+        },
+      },
+      (res) => {
+        const parts: string[] = [JSON.stringify(res.headers)];
+        res.setEncoding("utf8");
+        res.on("data", (c: string) => parts.push(c));
+        res.on("end", () => resolve(parts.join("")));
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
 }
 
 describe("method registry", () => {
@@ -70,7 +103,14 @@ describe("method registry", () => {
         secret: "leak/check",
       });
 
-      const responses: unknown[] = [put];
+      // The browser path: the value goes in over HTTP and must not come back out anywhere.
+      const begun = await env.client.call<{ url: string; elicitationId: string }>("capture.begin", {
+        name: "leak/browser",
+      });
+      const page = await submit(begun.url, SECRET);
+      const waited = await env.client.call("capture.wait", { elicitationId: begun.elicitationId });
+
+      const responses: unknown[] = [put, begun, waited, page];
       for (const [method, def] of Object.entries(registry)) {
         if (def.mutates) continue;
         responses.push(await env.client.call(method, READ_PARAMS[method]));
@@ -78,6 +118,7 @@ describe("method registry", () => {
       const wire = JSON.stringify(responses);
       for (const form of forms(SECRET)) expect(wire).not.toContain(form);
       expect(wire).toContain("leak/check");
+      expect(wire).toContain("Stored as leak/browser");
     });
   });
 });
