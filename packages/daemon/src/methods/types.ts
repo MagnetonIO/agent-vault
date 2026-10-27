@@ -44,7 +44,7 @@ export type MethodDef = {
   handler: (ctx: Ctx, params: unknown) => unknown;
   /** Writes an audit event for every call. */
   mutates: boolean;
-  /** Returns secret bytes. Only `helper.get` may be true. */
+  /** Returns secret bytes. Only `helper.get` and `vault.init` (the recovery words) may be true. */
   returnsSecret: boolean;
 };
 

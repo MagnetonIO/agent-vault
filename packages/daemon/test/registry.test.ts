@@ -71,12 +71,13 @@ function submit(url: string, value: string): Promise<string> {
 }
 
 describe("method registry", () => {
-  test("no method returns secret bytes", () => {
+  test("only helper.get and vault.init return secret bytes", () => {
     const leaking = Object.entries(registry)
       .filter(([, def]) => def.returnsSecret)
       .map(([name]) => name);
-    // helper.get is the one method allowed to, and it only serves secrets tagged `helper`.
-    expect(leaking).toEqual(["helper.get"]);
+    // helper.get serves only secrets tagged `helper`. vault.init returns the 24 recovery words
+    // once, at init; they unlock the whole vault. Nothing else may ever join this set.
+    expect(new Set(leaking)).toEqual(new Set(["helper.get", "vault.init"]));
   });
 
   test("the registry is frozen and every entry is complete", () => {

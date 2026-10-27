@@ -10,9 +10,9 @@ import type { Registry } from "./types.js";
 import { vaultMethods } from "./vault.js";
 
 /**
- * Every RPC method. Nothing here returns secret bytes except `helper.get`, the one method that
- * may set `returnsSecret` (and only for secrets tagged `helper`); the registry test fails if any
- * other does. `run.start` sends the child's output, redacted.
+ * Every RPC method. Only two set `returnsSecret`: `helper.get` (and only for secrets tagged
+ * `helper`), and `vault.init`, which returns the recovery words once. The registry test fails if
+ * any other does. `run.start` sends the child's output, redacted.
  */
 export const registry: Registry = Object.freeze({
   ...vaultMethods,

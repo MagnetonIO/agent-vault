@@ -1035,11 +1035,11 @@ let i = 0;
       expect(err.data).toEqual({ name: "SecretNotFoundError" });
     });
 
-    test("is the only method that returns secret bytes", () => {
+    test("is the only method besides vault.init (the recovery words) that returns secret bytes", () => {
       const leaking = Object.entries(registry)
         .filter(([, def]) => def.returnsSecret)
         .map(([name]) => name);
-      expect(leaking).toEqual(["helper.get"]);
+      expect(new Set(leaking)).toEqual(new Set(["helper.get", "vault.init"]));
     });
   });
 });

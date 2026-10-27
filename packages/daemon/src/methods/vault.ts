@@ -37,9 +37,9 @@ export const vaultMethods: Registry = {
   },
   "vault.init": {
     mutates: true,
-    returnsSecret: false,
-    // The recovery words cross the wire here, once, by design. They are shown to the user and
-    // stored nowhere, so this is not a secret-returning read.
+    // The recovery words cross the wire here, once, by design: they are shown to the user and
+    // stored nowhere. They unlock the whole vault, so this counts as returning a secret.
+    returnsSecret: true,
     handler: async (ctx, params) => {
       const p = paramsObject(params, ["keystore", "harness"]);
       if (reqString(p, "keystore") !== ctx.store.kind) {
