@@ -337,38 +337,46 @@ describe("agent-vault CLI", { timeout: TIMEOUT_MS }, () => {
     expect(twice.stderr).toContain("A given more than once");
   });
 
-  test("run relays Ctrl-C to the child and returns the child's code", async () => {
-    const child = sb.start([
-      "run",
-      "--",
-      "node",
-      "-e",
-      "process.on('SIGINT',()=>{console.log('got-int');process.exit(5)});console.log('ready');setInterval(()=>{},1000)",
-    ]);
-    await child.until("ready");
-    child.child.kill("SIGINT");
-    const res = await child.done;
-    expect(res.code).toBe(5);
-    expect(res.stdout).toContain("got-int");
-  });
+  // Windows cannot deliver SIGINT to a process: the CLI would just be killed. The daemon side is
+  // covered by runner.test.ts there.
+  test.runIf(process.platform !== "win32")(
+    "run relays Ctrl-C to the child and returns the child's code",
+    async () => {
+      const child = sb.start([
+        "run",
+        "--",
+        "node",
+        "-e",
+        "process.on('SIGINT',()=>{console.log('got-int');process.exit(5)});console.log('ready');setInterval(()=>{},1000)",
+      ]);
+      await child.until("ready");
+      child.child.kill("SIGINT");
+      const res = await child.done;
+      expect(res.code).toBe(5);
+      expect(res.stdout).toContain("got-int");
+    },
+  );
 
-  test("run: the 2nd Ctrl-C sends SIGTERM and the 3rd leaves with 130", async () => {
-    const child = sb.start([
-      "run",
-      "--",
-      "node",
-      "-e",
-      "process.on('SIGINT',()=>console.log('got-int'));process.on('SIGTERM',()=>console.log('got-term'));console.log('ready');setInterval(()=>{},1000)",
-    ]);
-    await child.until("ready");
-    child.child.kill("SIGINT");
-    await child.until("got-int");
-    child.child.kill("SIGINT");
-    await child.until("got-term");
-    child.child.kill("SIGINT");
-    const res = await child.done;
-    expect(res.code).toBe(130);
-  });
+  test.runIf(process.platform !== "win32")(
+    "run: the 2nd Ctrl-C sends SIGTERM and the 3rd leaves with 130",
+    async () => {
+      const child = sb.start([
+        "run",
+        "--",
+        "node",
+        "-e",
+        "process.on('SIGINT',()=>console.log('got-int'));process.on('SIGTERM',()=>console.log('got-term'));console.log('ready');setInterval(()=>{},1000)",
+      ]);
+      await child.until("ready");
+      child.child.kill("SIGINT");
+      await child.until("got-int");
+      child.child.kill("SIGINT");
+      await child.until("got-term");
+      child.child.kill("SIGINT");
+      const res = await child.done;
+      expect(res.code).toBe(130);
+    },
+  );
 
   test("daemon run exits 0 when a daemon already runs", async () => {
     expect(await sb.daemonPid()).not.toBeNull();
@@ -410,7 +418,7 @@ describe("agent-vault CLI", { timeout: TIMEOUT_MS }, () => {
   });
 });
 
-describe("the keyfile passphrase", () => {
+describe("the keyfile passphrase", { timeout: TIMEOUT_MS }, () => {
   const sb = sandbox();
   const NOT_IN_ENVIRON = [PASSPHRASE, "7731", "AGENT_VAULT_KEYFILE_PASSPHRASE"];
 
