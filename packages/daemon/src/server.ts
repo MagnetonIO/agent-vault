@@ -356,9 +356,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
   const endpoint = opts.endpoint ?? ipcEndpoint(paths);
   const state: DaemonState = { vault: null, initializing: false, closed: false };
   // First and synchronous: of several daemons started at once, exactly one gets past this line.
-  (globalThis as { __trace?: (l: string) => void }).__trace?.("startDaemon enter");
   const releaseLock = acquireLock(paths.runtimeDir);
-  (globalThis as { __trace?: (l: string) => void }).__trace?.("lock acquired");
 
   const token = endpoint.kind === "tcp" ? randomBytes(32) : null;
   const sockets = new Set<net.Socket>();
@@ -370,7 +368,6 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
     } catch (err) {
       if (!(err instanceof VaultNotInitializedError)) throw err;
     }
-    (globalThis as { __trace?: (l: string) => void }).__trace?.("vault opened");
     const dispatch = createDispatcher({
       registry: opts.methods ?? defaultRegistry,
       state,
@@ -394,7 +391,6 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
     throw err;
   }
 
-  (globalThis as { __trace?: (l: string) => void }).__trace?.("listening, endpoint written");
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => {
     closing ??= (async () => {

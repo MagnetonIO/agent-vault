@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ipcEndpoint } from "@agent-vault/platform";
@@ -23,16 +22,8 @@ describe("ensureDaemon", () => {
     vi.stubEnv("USERPROFILE", tmp.dir);
     vi.stubEnv("CODEX_HOME", tmp.dir);
     vi.stubEnv("AGENT_VAULT_KEYFILE_PASSPHRASE", "fixture passphrase");
-    vi.stubEnv("AV_TRACE", path.join(os.tmpdir(), `avtrace-${process.pid}-${Date.now()}.log`));
   });
   afterEach(() => {
-    const trace = process.env.AV_TRACE;
-    if (trace && fs.existsSync(trace)) {
-      console.log(
-        `TRACE (${trace}), parent clock at dump ${Date.now()}\n${fs.readFileSync(trace, "utf8")}`,
-      );
-      fs.rmSync(trace, { force: true });
-    }
     vi.unstubAllEnvs();
   });
 
@@ -41,12 +32,10 @@ describe("ensureDaemon", () => {
     await expect(connect(endpoint)).rejects.toThrow();
 
     const started = Date.now();
-    console.log(`TRACE spawn requested at ${started}`);
     const client = await ensureDaemon(tmp.paths, {
       spawnArgv: [process.execPath, "--import", tsxLoader, fixture],
     });
     try {
-      console.log(`TRACE connected after ${Date.now() - started} ms`);
       expect(Date.now() - started).toBeLessThan(3000);
       expect(await client.call("status")).toEqual({
         initialized: false,
