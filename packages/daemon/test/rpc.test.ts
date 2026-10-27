@@ -80,7 +80,7 @@ describe.each(MODES)("daemon over %s", (mode) => {
 
       // The words are not in the audit log, but the init is.
       const events = await env.client.call<AuditEvent[]>("audit.query");
-      expect(JSON.stringify(events)).not.toContain(recoveryWords[0] as string);
+      expect(JSON.stringify(events)).not.toContain(recoveryWords.join(" "));
       expect(events.map((e) => [e.operation, e.outcome])).toEqual([
         ["vault.init", "error"],
         ["vault.init", "brokered"],
