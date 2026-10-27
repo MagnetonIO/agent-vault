@@ -1,5 +1,8 @@
+import fs from "node:fs";
 import http from "node:http";
-import { describe, expect, test } from "vitest";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { RpcError } from "../src/errors.js";
 import { registry } from "../src/methods/index.js";
 import { b64, MODES, useDaemon } from "./helpers.js";
@@ -93,6 +96,23 @@ describe("method registry", () => {
   describe.each(MODES)("over %s", (mode) => {
     const env = useDaemon(mode, { init: true });
 
+    // scrub.* may only touch files under the home dir: give them a sandbox one.
+    let home: string;
+    let savedHome: { HOME?: string | undefined; USERPROFILE?: string | undefined };
+    beforeEach(() => {
+      savedHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+      home = fs.mkdtempSync(path.join(os.tmpdir(), "avr-"));
+      process.env.HOME = home;
+      process.env.USERPROFILE = home;
+    });
+    afterEach(() => {
+      for (const [key, value] of Object.entries(savedHome)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    });
+
     test("no registered read returns the stored value in any encoding", async () => {
       const put = await env.client.call("secret.put", {
         name: "leak/check",
@@ -120,11 +140,24 @@ describe("method registry", () => {
       );
       expect(refused).not.toHaveProperty("value");
 
-      const responses: unknown[] = [put, begun, waited, page, refused];
+      // The scrubber reads the value to find it in a transcript; nothing it answers may carry it.
+      const transcript = path.join(home, "transcript.jsonl");
+      fs.writeFileSync(transcript, `${JSON.stringify({ text: SECRET })}\n`);
+      const queued = await env.client.call("scrub.queue", {
+        harness: "claude-code",
+        files: [transcript],
+        secretNames: ["leak/check"],
+      });
+      const scrubbed = await env.client.call("scrub.run", { harness: "claude-code" });
+      expect(scrubbed).toMatchObject({ filesChanged: 1, replacements: 1 });
+      expect(fs.readFileSync(transcript, "utf8")).not.toContain(SECRET);
+
+      const responses: unknown[] = [put, begun, waited, page, refused, queued, scrubbed];
       for (const [method, def] of Object.entries(registry)) {
         if (def.mutates || SELF_AUDITED.has(method)) continue;
         responses.push(await env.client.call(method, READ_PARAMS[method]));
       }
+      responses.push(await env.client.call("audit.query", { limit: 100 }));
       const wire = JSON.stringify(responses);
       for (const form of forms(SECRET)) expect(wire).not.toContain(form);
       expect(wire).toContain("leak/check");

@@ -368,4 +368,48 @@ describe("redactor", () => {
     expect(out).not.toMatch(/[\uD800-\uDBFF]$/);
     expect(out + r.flush()).toBe("\u{1F600}".repeat(20));
   });
+
+  describe("custom marker and match count", () => {
+    const value = "sk-live-abcdef123456";
+
+    test("marker replaces the default text", () => {
+      const r = createRedactor([{ name: "api/key", value }], { marker: (n) => `vault://${n}` });
+      expect(r.push(`a ${value} b`) + r.flush()).toBe("a vault://api/key b");
+    });
+
+    test("matchCount counts redactions emitted, not matches seen", () => {
+      const r = createRedactor([{ name: "k", value }]);
+      expect(r.matchCount()).toBe(0);
+      r.push(`x ${value} y ${value.slice(0, 6)}`);
+      expect(r.matchCount()).toBe(1);
+      r.push(`${value.slice(6)} z`);
+      expect(r.matchCount()).toBe(2);
+      r.flush();
+      expect(r.matchCount()).toBe(2);
+    });
+
+    test("a held match is counted once it is flushed", () => {
+      const r = createRedactor([{ name: "k", value }]);
+      r.push(`end ${value}`);
+      r.flush();
+      expect(r.matchCount()).toBe(1);
+    });
+
+    test("the JSON-escaped form of a multi-line value matches", () => {
+      const pem = "-----BEGIN KEY-----\nAAAA\nBBBB\n-----END KEY-----\n";
+      const r = createRedactor([{ name: "pem", value: pem }], { marker: (n) => `vault://${n}` });
+      const json = JSON.stringify({ k: pem });
+      expect(r.push(json) + r.flush()).toBe('{"k":"vault://pem"}');
+    });
+
+    test("a wrapped base64 copy inside a JSON string matches (its newlines are escaped)", () => {
+      const secret = "x".repeat(10) + "SeCrEt".repeat(30);
+      const wrapped = Buffer.from(secret)
+        .toString("base64")
+        .replace(/(.{76})/g, "$1\n");
+      const json = JSON.stringify({ blob: wrapped });
+      const r = createRedactor([{ name: "w", value: secret }], { marker: (n) => `vault://${n}` });
+      expect(r.push(json) + r.flush()).toBe('{"blob":"vault://w"}');
+    });
+  });
 });

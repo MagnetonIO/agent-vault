@@ -3,7 +3,16 @@ export type Redactor = {
   flush(): string;
   /** How many chars are held back right now; at most about twice the longest variant. */
   heldLength(): number;
+  /** How many redactions have been emitted so far (a merged run of matches counts once). */
+  matchCount(): number;
 };
+
+export type RedactorOptions = {
+  /** The text that replaces a match of the secret called `name`. Defaults to `[redacted vault://<name>]`. */
+  marker?: (name: string) => string;
+};
+
+const defaultMarker = (name: string): string => `[redacted vault://${name}]`;
 
 type Span = { start: number; end: number; name: string };
 
@@ -26,7 +35,9 @@ const wrap = (text: string, columns: number, lineBreak: string): string => {
  * Every form one secret is likely to be printed in: raw; standard base64, also wrapped at 64 and
  * 76 columns with LF or CRLF; base64url (no padding); URI-component with upper- and lowercase
  * `%xx`; and the inside of a JSON string literal (what `JSON.stringify` prints for a value with
- * quotes, backslashes or control characters).
+ * quotes, backslashes or control characters). Any form that contains a control character (the
+ * wrapped base64 ones) is also listed in that escaped form, since that is how a JSON transcript
+ * stores a multi-line copy.
  */
 function variantsOf(value: string): string[] {
   if (value.length < MIN_ENCODED_LENGTH) return [value];
@@ -44,7 +55,10 @@ function variantsOf(value: string): string[] {
       LINE_BREAKS.map((lineBreak) => wrap(base64, columns, lineBreak)),
     ),
   ];
-  return [...new Set(forms)];
+  const escaped = forms
+    .filter((form) => /\p{Cc}/u.test(form))
+    .map((form) => JSON.stringify(form).slice(1, -1));
+  return [...new Set([...forms, ...escaped])];
 }
 
 const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
@@ -63,7 +77,12 @@ const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
  *
  * Throws `RangeError` (naming the secret, never its value) for values under 4 chars.
  */
-export function createRedactor(secrets: { name: string; value: string }[]): Redactor {
+export function createRedactor(
+  secrets: { name: string; value: string }[],
+  opts: RedactorOptions = {},
+): Redactor {
+  const marker = opts.marker ?? defaultMarker;
+  let emitted = 0;
   const variants = new Map<string, string>();
   for (const s of secrets) {
     if (s.value.length < MIN_SECRET_LENGTH) {
@@ -141,7 +160,8 @@ export function createRedactor(secrets: { name: string; value: string }[]): Reda
           // on every push. Everything before `limit` is covered by whole matches, so redact it
           // now. A match that begins before `limit` and ends after it is redacted too: its end
           // is remembered as `covered` so it is dropped, never printed, when the tail is sent.
-          out += `${buf.slice(cursor, m.start)}[redacted vault://${m.name}]`;
+          out += buf.slice(cursor, m.start) + marker(m.name);
+          emitted++;
           cursor = limit;
           for (const f of found) {
             if (f.start >= m.start && f.start < limit) coverEnd = Math.max(coverEnd, f.end);
@@ -151,7 +171,8 @@ export function createRedactor(secrets: { name: string; value: string }[]): Reda
         }
         break;
       }
-      out += `${buf.slice(cursor, m.start)}[redacted vault://${m.name}]`;
+      out += buf.slice(cursor, m.start) + marker(m.name);
+      emitted++;
       cursor = m.end;
     }
     return {
@@ -179,5 +200,6 @@ export function createRedactor(secrets: { name: string; value: string }[]): Reda
       return out;
     },
     heldLength: () => held.length,
+    matchCount: () => emitted,
   };
 }
