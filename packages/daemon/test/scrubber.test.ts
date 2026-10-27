@@ -743,6 +743,22 @@ describe("scrub.queue and scrub.run", () => {
     }
   });
 
+  test("a file whose directories do not exist yet is queued, then scrubbed once it is written", async () => {
+    await put("api/key", SECRET);
+    // Claude's `-p` creates the transcript, and projects/<proj>/ with it, after the hook ran.
+    const file = path.join(home, ".claude", "projects", "later", "s.jsonl");
+    expect(fs.existsSync(path.dirname(file))).toBe(false);
+    expect(await queue([file], ["api/key"])).toEqual({ queued: 1 });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, jsonl({ text: SECRET }));
+    const result = await run();
+    expect(result).toMatchObject({ filesChanged: 1, replacements: 1, remaining: 0 });
+    expect(fs.readFileSync(file, "utf8")).not.toContain(SECRET);
+    // The nearest existing ancestor still has to be under home.
+    const outside = path.join(os.tmpdir(), "avo-does-not-exist", "deeper", "x.jsonl");
+    expect(await codeOf(queue([outside], ["api/key"]))).toBe(-32602);
+  });
+
   test("a directory that is a symlink out of home is refused", async () => {
     await put("api/key", SECRET);
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "avo-"));
