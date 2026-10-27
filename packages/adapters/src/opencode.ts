@@ -12,7 +12,15 @@ import {
 } from "./adapter.js";
 import { backupFile, writeFileAtomic } from "./backup.js";
 import type { HookClient } from "./hook.js";
-import { JsonEditError, parseJson, removeAt, setAt } from "./json-edit.js";
+import { type FileState, loadState, pruneFrom, saveState } from "./install-state.js";
+import {
+  JsonEditError,
+  type JsonPath,
+  missingContainers,
+  parseJson,
+  removeAt,
+  setAt,
+} from "./json-edit.js";
 
 /** What a new `opencode.json` starts with. */
 export const OPENCODE_SCHEMA = "https://opencode.ai/config.json";
@@ -34,6 +42,8 @@ export type OpenCodeDeps = {
   env?: NodeJS.ProcessEnv | undefined;
   /** Default `getPaths().backupsDir`. */
   backupsDir?: string | undefined;
+  /** Where install records what it created. Default `<dataDir>/adapters/opencode-state.json`. */
+  stateFile?: string | undefined;
 };
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -48,6 +58,8 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
   const env = deps.env ?? process.env;
   const log = deps.log ?? (() => {});
   const backupsDir = (): string => deps.backupsDir ?? getPaths().backupsDir;
+  const stateFile = (): string =>
+    deps.stateFile ?? path.join(getPaths().dataDir, "adapters", "opencode-state.json");
 
   /** `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode` (on every OS, as OpenCode does). */
   const configDir = (home: string): string => {
@@ -97,7 +109,7 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
     );
   };
 
-  /** What install writes into a file that was not there. Uninstall deletes a file left like this. */
+  /** What install writes into a file that was not there. */
   const scaffold = (): string => `{\n  "$schema": "${OPENCODE_SCHEMA}"\n}\n`;
 
   const read = (file: string): string => fs.readFileSync(file, "utf8");
@@ -124,6 +136,23 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
       throw new AdapterError(`${file}: "mcp.${MCP_NAME}" is not an object; fix it by hand first`);
     }
     return found;
+  };
+
+  const same = (a: JsonPath, b: JsonPath): boolean => a.join("\0") === b.join("\0");
+
+  /**
+   * Save `next` over `file`, unless install made the file and only its own `$schema` is left
+   * (delete it), or the file was blank before and nothing is left (put the blank back).
+   */
+  const finish = (file: string, next: string, recorded: FileState | undefined): void => {
+    const root = parseJson(next);
+    const keys = Object.keys(root);
+    const onlySchema = keys.length === 1 && root.$schema === OPENCODE_SCHEMA;
+    if (recorded?.createdFile && (keys.length === 0 || onlySchema))
+      fs.rmSync(file, { force: true });
+    else if (keys.length === 0 && recorded?.whitespace !== undefined) {
+      writeFileAtomic(file, recorded.whitespace);
+    } else writeFileAtomic(file, next);
   };
 
   const adapter: HarnessAdapter = {
@@ -164,7 +193,18 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
 
       const target = current?.file ?? files[0] ?? jsonFile(home);
       const before = texts.get(target);
-      const next = setAt(before ?? scaffold(), ["mcp", MCP_NAME], entry());
+      const base = before ?? scaffold();
+      // Containers this install makes, plus ones an earlier install made that are still there:
+      // uninstall may take only these.
+      const state = loadState(stateFile());
+      const previous = state.files[target];
+      const created: JsonPath[] = missingContainers(base, ["mcp"]);
+      for (const p of previous?.created ?? []) {
+        if (missingContainers(base, p).length === 0 && !created.some((c) => same(c, p))) {
+          created.push(p);
+        }
+      }
+      const next = setAt(base, ["mcp", MCP_NAME], entry());
       if (before !== undefined) {
         report.backups.push(backupFile(target, backupsDir()));
         writeFileAtomic(target, next);
@@ -172,6 +212,15 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, next);
       }
+      const whitespace =
+        before !== undefined && before.trim() === "" ? before : previous?.whitespace;
+      state.files[target] = {
+        createdFile: before === undefined || (previous?.createdFile ?? false),
+        ...(whitespace !== undefined && { whitespace }),
+        created,
+        prefix: deps.command.join(" "),
+      };
+      saveState(stateFile(), state);
       report.files.push(target);
       report.notes.push(
         `MCP server agent-vault ${current ? "replaced" : "added"} in ${target}`,
@@ -181,20 +230,22 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
     },
 
     async uninstall(home) {
+      const state = loadState(stateFile());
       for (const file of existing(home)) {
         const text = read(file);
         const mine = entryOf(file, parsed(file, text));
-        if (mine === null) continue;
-        if (!isOurs(mine)) {
+        if (mine !== null && !isOurs(mine)) {
           log(`${foreignBase(file)}; left it alone`);
           continue;
         }
-        const next = removeAt(text, ["mcp", MCP_NAME]);
+        const recorded = state.files[file];
+        delete state.files[file];
+        if (mine === null) continue;
+        const next = removeAt(text, ["mcp", MCP_NAME], pruneFrom(recorded));
         backupFile(file, backupsDir());
-        // A file install made holds nothing but what install put there.
-        if (next === scaffold()) fs.rmSync(file);
-        else writeFileAtomic(file, next);
+        finish(file, next, recorded);
       }
+      saveState(stateFile(), state);
     },
 
     async doctor(home): Promise<DoctorReport> {
@@ -261,6 +312,11 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
     },
 
     async handleHook(): Promise<HookOutput> {
+      return null;
+    },
+
+    /** OpenCode has no prompt hook, so there is nothing to block: print nothing (allow). */
+    blockOutput(): HookOutput {
       return null;
     },
 

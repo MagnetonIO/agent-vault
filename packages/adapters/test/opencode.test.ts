@@ -23,6 +23,8 @@ const read = (file: string): string => fs.readFileSync(file, "utf8");
 const backups = (): string[] =>
   fs.existsSync(box.paths.backupsDir) ? fs.readdirSync(box.paths.backupsDir) : [];
 
+const stateFile = () => path.join(box.dir, "state", "opencode-state.json");
+
 /** Where OpenCode looks when XDG_CONFIG_HOME is unset. */
 const defaultDir = () => path.join(box.home, ".config", "opencode");
 const jsonFile = (dir = defaultDir()) => path.join(dir, "opencode.json");
@@ -43,6 +45,7 @@ function make(
     command,
     env: extra.env ?? {},
     backupsDir: box.paths.backupsDir,
+    stateFile: stateFile(),
     client: extra.client ?? (async () => connect(ipcEndpoint(box.paths))),
     log: (m) => logs.push(m),
   });
@@ -131,7 +134,8 @@ describe("an agent-vault entry that is not ours", () => {
     const root = parseJsonc(read(jsonFile())) as { mcp: Record<string, unknown> };
     expect(root.mcp["agent-vault"]).toEqual(entryOf(command));
     await adapter.uninstall(box.home);
-    expect(parseJsonc(read(jsonFile()))).toEqual({});
+    // No record says install made `mcp`, so it stays (empty).
+    expect(parseJsonc(read(jsonFile()))).toEqual({ mcp: {} });
   });
 
   test("the bare name agent-vault counts as ours", async () => {
@@ -367,6 +371,67 @@ describe("uninstall", () => {
     expect(read(jsonFile())).toContain("// my opencode setup");
   });
 
+  test("an empty mcp object the user had comes back as it was", async () => {
+    const { adapter } = make();
+    for (const original of [
+      `{\n  "mcp": {}\n}\n`,
+      `{ "theme": "x", "mcp": {} }`,
+      `{\n  "mcp": {\n    // add servers here\n  }\n}\n`,
+    ]) {
+      write(jsonFile(), original);
+      await adapter.install({ home: box.home });
+      expect(read(jsonFile()), original).not.toBe(original);
+      await adapter.uninstall(box.home);
+      expect(read(jsonFile()), original).toBe(original);
+    }
+  });
+
+  test("a file that held only white space gets that white space back", async () => {
+    const { adapter } = make();
+    for (const original of ["", "\n", "  \n\n", "\t\r\n"]) {
+      write(jsonFile(), original);
+      await adapter.install({ home: box.home });
+      expect(parseJsonc(read(jsonFile()))).toHaveProperty("mcp");
+      await adapter.uninstall(box.home);
+      expect(read(jsonFile()), JSON.stringify(original)).toBe(original);
+    }
+  });
+
+  test("the mcp object install made goes with the entry; one the user had stays", async () => {
+    const { adapter } = make();
+    write(jsonFile(), `{ "theme": "x" }\n`);
+    await adapter.install({ home: box.home });
+    await adapter.uninstall(box.home);
+    expect(read(jsonFile())).toBe(`{ "theme": "x" }\n`);
+
+    write(jsonFile(), `{ "mcp": { "a": { "type": "remote", "url": "u" } } }\n`);
+    await adapter.install({ home: box.home });
+    await adapter.uninstall(box.home);
+    expect(read(jsonFile())).toBe(`{ "mcp": { "a": { "type": "remote", "url": "u" } } }\n`);
+  });
+
+  test("a file that merely looks like the one install writes is not deleted", async () => {
+    const { adapter } = make();
+    // The user's own file, byte for byte what a fresh install would have made after uninstall.
+    const lookalike = `{\n  "$schema": "${OPENCODE_SCHEMA}"\n}\n`;
+    write(jsonFile(), lookalike);
+    await adapter.install({ home: box.home });
+    await adapter.uninstall(box.home);
+    expect(read(jsonFile())).toBe(lookalike);
+  });
+
+  test("the record is dropped on uninstall, and a later install starts fresh", async () => {
+    const { adapter } = make();
+    await adapter.install({ home: box.home });
+    expect(fs.existsSync(stateFile())).toBe(true);
+    await adapter.uninstall(box.home);
+    expect(fs.existsSync(stateFile())).toBe(false);
+    write(jsonFile(), "{}\n");
+    await adapter.install({ home: box.home });
+    await adapter.uninstall(box.home);
+    expect(read(jsonFile())).toBe("{}\n");
+  });
+
   test("with nothing installed it does nothing: no file, no backup", async () => {
     const { adapter } = make();
     await adapter.uninstall(box.home);
@@ -515,6 +580,11 @@ describe("the rest of the interface", () => {
       expect(await adapter.handleHook(event, null, { probe: true })).toBeNull();
     }
     expect(connects).toBe(0);
+  });
+
+  test("blockOutput is null: OpenCode has no prompt hook to block", () => {
+    const { adapter } = make();
+    expect(adapter.blockOutput("any reason")).toBeNull();
   });
 
   test("historyFiles is empty: the store is SQLite", () => {

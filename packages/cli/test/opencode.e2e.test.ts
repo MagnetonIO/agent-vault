@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test } from "vitest";
+import { fakes } from "../../detect/test/fixtures/fake-keys.js";
 import { alive, makeSandbox } from "./harness.js";
 
 // Each call starts node, and the first one in a sandbox also starts the daemon.
@@ -61,6 +62,21 @@ test("install, doctor and uninstall for opencode, in a sandbox that never runs o
       env: { PATH: empty, Path: empty, XDG_CONFIG_HOME: xdg },
     });
     expect(hook).toMatchObject({ code: 0, stdout: "" });
+
+    // No prompt hook exists for OpenCode: a key, a huge prompt and an unknown event all pass, silently.
+    const env = { PATH: empty, Path: empty, XDG_CONFIG_HOME: xdg };
+    const withKey = await sb.cli(["hook", "opencode", "prompt-submit"], {
+      stdin: JSON.stringify({ prompt: `use ${fakes.githubPat()}` }),
+      env,
+    });
+    expect(withKey).toMatchObject({ code: 0, stdout: "" });
+    const huge = await sb.cli(["hook", "opencode", "prompt-submit"], {
+      stdin: "a".repeat(9 * 1024 * 1024),
+      env,
+    });
+    expect(huge).toMatchObject({ code: 0, stdout: "" });
+    const other = await sb.cli(["hook", "opencode", "scrub"], { stdin: "{}", env });
+    expect(other).toMatchObject({ code: 0, stdout: "" });
 
     const removed = await run(["uninstall", "opencode"]);
     expect(removed.code, removed.stderr).toBe(0);
