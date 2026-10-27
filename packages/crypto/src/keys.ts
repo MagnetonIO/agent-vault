@@ -25,7 +25,7 @@ export function macEqual(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
-/** Argon2id, m=64 MiB, t=3, p=1. */
+/** Argon2id, m=64 MiB, t=3, p=1. Passphrase is NFKC-normalized so equivalent Unicode forms match. */
 export function deriveKeyfileKey(passphrase: string, salt: Uint8Array): Uint8Array {
-  return argon2id(passphrase, salt, { m: 65536, t: 3, p: 1, dkLen: KEY_LEN });
+  return argon2id(passphrase.normalize("NFKC"), salt, { m: 65536, t: 3, p: 1, dkLen: KEY_LEN });
 }

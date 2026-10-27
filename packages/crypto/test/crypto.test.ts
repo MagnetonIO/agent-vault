@@ -1,3 +1,4 @@
+import { argon2id } from "@noble/hashes/argon2.js";
 import { describe, expect, test } from "vitest";
 import {
   DecryptError,
@@ -62,8 +63,19 @@ describe("aead", () => {
   test("tampered ciphertext throws", () => {
     const k = randomKey();
     const sealed = seal(k, enc("secret"), aad());
-    sealed[30] = (sealed[30] ?? 0) ^ 1;
-    expect(() => open(k, sealed, aad())).toThrow(DecryptError);
+    for (const i of [0, 24, 30, sealed.length - 1]) {
+      const t = sealed.slice();
+      t[i] = (t[i] ?? 0) ^ 1;
+      expect(() => open(k, t, aad())).toThrow(DecryptError);
+    }
+  });
+
+  test("wrong-length key throws RangeError, not DecryptError", () => {
+    const sealed = seal(randomKey(), enc("x"), aad());
+    for (const bad of [new Uint8Array(16), new Uint8Array(0), new Uint8Array(33)]) {
+      expect(() => seal(bad, enc("x"), aad())).toThrow(RangeError);
+      expect(() => open(bad, sealed, aad())).toThrow(RangeError);
+    }
   });
 
   test("truncated input throws DecryptError", () => {
@@ -189,5 +201,24 @@ describe("keyfile kdf", () => {
     const a = deriveKeyfileKey("correct horse", salt);
     expect(a).toHaveLength(32);
     expect(deriveKeyfileKey("correct horse", salt)).toEqual(a);
+  }, 30_000);
+
+  test("argon2id matches RFC 9106 section 5.3 vector", () => {
+    const out = argon2id(new Uint8Array(32).fill(1), new Uint8Array(16).fill(2), {
+      key: new Uint8Array(8).fill(3),
+      personalization: new Uint8Array(12).fill(4),
+      m: 32,
+      t: 3,
+      p: 4,
+      dkLen: 32,
+    });
+    expect(Buffer.from(out).toString("hex")).toBe(
+      "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659",
+    );
+  });
+
+  test("passphrase is NFKC-normalized (precomposed and decomposed e-acute match)", () => {
+    const salt = new Uint8Array(16).fill(9);
+    expect(deriveKeyfileKey("\u00e9", salt)).toEqual(deriveKeyfileKey("e\u0301", salt));
   }, 30_000);
 });

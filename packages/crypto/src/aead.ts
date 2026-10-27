@@ -21,6 +21,10 @@ export interface AadParts {
   version: number;
 }
 
+function assertKey(key: Uint8Array): void {
+  if (key.length !== KEY_LEN) throw new RangeError(`key must be ${KEY_LEN} bytes`);
+}
+
 export function randomKey(): Uint8Array {
   return randomBytes(KEY_LEN);
 }
@@ -50,6 +54,7 @@ export function encodeAad(p: AadParts): Uint8Array {
 
 /** Returns nonce(24) ‖ ciphertext ‖ tag(16). */
 export function seal(key: Uint8Array, plaintext: Uint8Array, aad: Uint8Array): Uint8Array {
+  assertKey(key);
   const nonce = randomBytes(NONCE_LEN);
   const ct = xchacha20poly1305(key, nonce, aad).encrypt(plaintext);
   const out = new Uint8Array(NONCE_LEN + ct.length);
@@ -60,6 +65,7 @@ export function seal(key: Uint8Array, plaintext: Uint8Array, aad: Uint8Array): U
 
 /** Throws DecryptError on any failure (tamper, wrong key or AAD, truncation). */
 export function open(key: Uint8Array, sealed: Uint8Array, aad: Uint8Array): Uint8Array {
+  assertKey(key);
   if (sealed.length < NONCE_LEN + TAG_LEN) throw new DecryptError();
   try {
     return xchacha20poly1305(key, sealed.subarray(0, NONCE_LEN), aad).decrypt(
