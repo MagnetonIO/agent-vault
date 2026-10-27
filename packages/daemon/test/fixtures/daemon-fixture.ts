@@ -6,6 +6,17 @@ import path from "node:path";
 import { getPaths, openKeyfileStore } from "@agent-vault/platform";
 import { startDaemon } from "../../src/index.js";
 
+const traceFile = process.env.AV_TRACE;
+(globalThis as { __trace?: (l: string) => void }).__trace = (label) => {
+  if (traceFile) {
+    fs.appendFileSync(
+      traceFile,
+      `${Math.round(performance.now())}ms since node start (${Date.now()}) ${label}\n`,
+    );
+  }
+};
+(globalThis as { __trace?: (l: string) => void }).__trace?.("fixture imports done");
+
 const passphrase = process.env.AGENT_VAULT_KEYFILE_PASSPHRASE;
 if (!process.env.AGENT_VAULT_HOME || !passphrase) {
   console.error("AGENT_VAULT_HOME and AGENT_VAULT_KEYFILE_PASSPHRASE are required");

@@ -53,7 +53,9 @@ export function ensurePrivateDir(dir: string, platform: NodeJS.Platform = proces
 
   if (platform === "win32") {
     for (const args of icaclsCommands(dir, os.userInfo().username)) {
+      (globalThis as { __trace?: (l: string) => void }).__trace?.("icacls start");
       execFileSync(icaclsExe(), args, { stdio: "pipe" });
+      (globalThis as { __trace?: (l: string) => void }).__trace?.("icacls done");
     }
     return;
   }
