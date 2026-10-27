@@ -5,6 +5,18 @@ import { CliError } from "../errors.js";
 import { say, storedLine, warn } from "../output.js";
 import { collect, type PutResult } from "./set.js";
 
+/**
+ * What to store for clipboard text. A single line loses the whitespace a copy picks up at either
+ * end. Several lines (a PEM) are kept exactly, final newline included. Text that is empty, or that
+ * did not decode as UTF-8 (U+FFFD), is refused.
+ */
+export function clipboardValue(text: string): string {
+  const trimmed = text.replace(/^[ \t\r\n\f\v]+|[ \t\r\n\f\v]+$/g, "");
+  if (trimmed === "") throw new CliError("clipboard is empty");
+  if (text.includes("\uFFFD")) throw new CliError("clipboard is not text");
+  return trimmed.includes("\n") ? text : trimmed;
+}
+
 export function grabCommand(program: Command): void {
   program
     .command("grab")
@@ -13,9 +25,7 @@ export function grabCommand(program: Command): void {
     .option("--type <type>", "secret type")
     .option("--tag <tag>", "tag (repeatable)", collect, [] as string[])
     .action(async (name: string | undefined, opts: { type?: string; tag: string[] }) => {
-      // A copied value usually ends in a newline that is not part of it.
-      const value = (await readClipboard()).replace(/[\r\n]+$/, "");
-      if (value === "") throw new CliError("clipboard is empty");
+      const value = clipboardValue(await readClipboard());
       const bytes = Buffer.from(value, "utf8");
       let meta: PutResult;
       try {

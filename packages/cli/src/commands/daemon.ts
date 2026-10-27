@@ -1,54 +1,96 @@
 import fs from "node:fs";
-import { setTimeout as sleep } from "node:timers/promises";
-import { connect, DaemonAlreadyRunningError, startDaemon } from "@agent-vault/daemon";
+import { DaemonAlreadyRunningError, startDaemon } from "@agent-vault/daemon";
 import {
   getPaths,
-  ipcEndpoint,
   openKeyfileStore,
   openOsKeyring,
   type RootKeyStore,
   type VaultPaths,
+  WrongPassphraseError,
 } from "@agent-vault/platform";
-import type { Command } from "commander";
-import { keyfilePath, PASSPHRASE_ENV, readConfig } from "../config.js";
+import { type Command, Option } from "commander";
+import {
+  EXIT_WRONG_PASSPHRASE,
+  keyfilePath,
+  PASSPHRASE_ENV,
+  readConfig,
+  WRONG_PASSPHRASE_MESSAGE,
+} from "../config.js";
 import { LOCKED_MESSAGE } from "../context.js";
+import { stopDaemon } from "../daemon-control.js";
 import { CliError, exitWith } from "../errors.js";
-import { say } from "../output.js";
 import { isTty, promptPassphrase } from "../tty.js";
 
-const STOP_WAIT_MS = 5000;
+const STDIN_PASSPHRASE_TIMEOUT_MS = 5000;
 
-/** The key store the config names. A keyfile needs its passphrase: from env, else the terminal. */
-async function openConfiguredStore(paths: VaultPaths): Promise<RootKeyStore> {
+/** Exactly one line from stdin, then stdin is closed. Gives up after `timeoutMs`. */
+export function readPassphraseLine(
+  input: NodeJS.ReadableStream & { destroy?: () => unknown } = process.stdin,
+  timeoutMs = STDIN_PASSPHRASE_TIMEOUT_MS,
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let text = "";
+    const finish = (err: CliError | null, line = "") => {
+      clearTimeout(timer);
+      input.removeListener("data", onData);
+      input.removeListener("end", onEnd);
+      input.destroy?.();
+      if (err) reject(err);
+      else resolve(line);
+    };
+    const onData = (chunk: Buffer | string) => {
+      text += chunk.toString();
+      const nl = text.indexOf("\n");
+      if (nl !== -1) finish(null, text.slice(0, nl).replace(/\r$/, ""));
+    };
+    const onEnd = () => {
+      if (text === "") finish(new CliError("no passphrase arrived on stdin"));
+      else finish(null, text.replace(/\r$/, ""));
+    };
+    const timer = setTimeout(
+      () => finish(new CliError("timed out waiting for the passphrase on stdin")),
+      timeoutMs,
+    );
+    input.on("data", onData);
+    input.on("end", onEnd);
+  });
+}
+
+/**
+ * The key store the config names. A keyfile needs its passphrase: from stdin when a CLI spawned
+ * this daemon (`--passphrase-stdin`), else from the environment, else the terminal.
+ */
+async function openConfiguredStore(paths: VaultPaths, fromStdin: boolean): Promise<RootKeyStore> {
   if (readConfig(paths) === "os") return openOsKeyring();
-  let passphrase = process.env[PASSPHRASE_ENV];
-  // Do not leave it in the environment of this long-lived process.
-  delete process.env[PASSPHRASE_ENV];
-  if (!passphrase) {
-    if (!isTty()) throw new CliError(LOCKED_MESSAGE);
-    passphrase = await promptPassphrase(!fs.existsSync(keyfilePath(paths)));
+  let passphrase: string | undefined;
+  if (fromStdin) {
+    passphrase = await readPassphraseLine();
+  } else {
+    passphrase = process.env[PASSPHRASE_ENV];
+    // Unsets it for this process and what it starts. It cannot clear the block the OS keeps from
+    // exec time, which is why a CLI that autostarts a daemon uses --passphrase-stdin instead.
+    delete process.env[PASSPHRASE_ENV];
+    if (!passphrase) {
+      if (!isTty()) throw new CliError(LOCKED_MESSAGE);
+      passphrase = await promptPassphrase(!fs.existsSync(keyfilePath(paths)));
+    }
   }
+  if (!passphrase) throw new CliError(LOCKED_MESSAGE);
   return openKeyfileStore(keyfilePath(paths), passphrase);
 }
 
-const alive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
-};
-
-async function runDaemon(): Promise<void> {
+async function runDaemon(opts: { passphraseStdin?: boolean }): Promise<void> {
   const paths = getPaths();
-  const store = await openConfiguredStore(paths);
+  const store = await openConfiguredStore(paths, opts.passphraseStdin === true);
   let handle: Awaited<ReturnType<typeof startDaemon>>;
   try {
     handle = await startDaemon({ paths, store });
   } catch (err) {
     // Losing the race to another daemon is how a second start ends.
     if (err instanceof DaemonAlreadyRunningError) await exitWith(0);
+    if (err instanceof WrongPassphraseError) {
+      throw new CliError(WRONG_PASSPHRASE_MESSAGE, EXIT_WRONG_PASSPHRASE);
+    }
     throw err;
   }
   const shutdown = () => void handle.close();
@@ -58,31 +100,24 @@ async function runDaemon(): Promise<void> {
   await exitWith(0);
 }
 
-async function stopDaemon(): Promise<void> {
-  // Never start a daemon just to stop it.
-  const client = await connect(ipcEndpoint(getPaths())).catch(() => null);
-  if (!client) {
-    say("vaultd is not running");
-    return;
-  }
-  try {
-    const { pid } = await client.call<{ pid: number }>("status");
-    await client.call("daemon.stop");
-    const deadline = Date.now() + STOP_WAIT_MS;
-    while (alive(pid)) {
-      if (Date.now() > deadline) throw new CliError(`vaultd (pid ${pid}) did not stop within 5 s`);
-      await sleep(50);
-    }
-  } finally {
-    client.close();
-  }
-  say("vaultd stopped");
-}
-
 export function daemonCommand(program: Command): void {
   const daemon = program
     .command("daemon")
     .description("the background process that holds the vault");
-  daemon.command("run").description("run vaultd in the foreground").action(runDaemon);
-  daemon.command("stop").description("stop vaultd").action(stopDaemon);
+  daemon
+    .command("run")
+    .description(
+      `run vaultd in the foreground. A keyfile passphrase is read from ${PASSPHRASE_ENV} or the terminal; a daemon started with it in its own environment keeps it there for its whole life, so prefer the terminal prompt`,
+    )
+    .addOption(
+      new Option(
+        "--passphrase-stdin",
+        "read the keyfile passphrase as one line on stdin",
+      ).hideHelp(),
+    )
+    .action(runDaemon);
+  daemon
+    .command("stop")
+    .description("stop vaultd")
+    .action(async () => stopDaemon(getPaths()));
 }

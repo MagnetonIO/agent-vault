@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +15,15 @@ export const PASSPHRASE = "e2e passphrase 7731";
 
 export type Result = { code: number | null; stdout: string; stderr: string };
 
+export type RunningCli = {
+  child: ChildProcess;
+  stdout: string;
+  stderr: string;
+  done: Promise<Result>;
+  /** Wait until stdout holds `text`. */
+  until(text: string, ms?: number): Promise<void>;
+};
+
 export type Sandbox = {
   dir: string;
   home: string;
@@ -23,6 +32,8 @@ export type Sandbox = {
   env: NodeJS.ProcessEnv;
   /** Run the CLI. `stdin` is written and closed; omitted, stdin is closed at once. */
   cli(args: string[], opts?: { stdin?: string; env?: NodeJS.ProcessEnv }): Promise<Result>;
+  /** Like `cli`, but running: signal it, watch its output. */
+  start(args: string[], opts?: { stdin?: string; env?: NodeJS.ProcessEnv }): RunningCli;
   /** The pid of the sandbox's daemon, or null if none answers. Never starts one. */
   daemonPid(): Promise<number | null>;
   /** `daemon stop`, then wait for the process to be gone. Throws if it is not. */
@@ -51,22 +62,35 @@ export function makeSandbox(keystore: "keyfile" | "os" = "keyfile"): Sandbox {
     AGENT_VAULT_TEST_CLIPBOARD_FILE: clipboard,
   };
 
-  const cli: Sandbox["cli"] = (args, opts = {}) =>
-    new Promise((resolve, reject) => {
-      const child: ChildProcess = spawn(process.execPath, [CLI, ...args], {
-        env: { ...env, ...opts.env },
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-      });
-      let stdout = "";
-      let stderr = "";
-      child.stdout?.setEncoding("utf8").on("data", (c: string) => (stdout += c));
-      child.stderr?.setEncoding("utf8").on("data", (c: string) => (stderr += c));
-      child.once("error", reject);
-      child.once("close", (code) => resolve({ code, stdout, stderr }));
-      child.stdin?.on("error", () => {});
-      child.stdin?.end(opts.stdin ?? "");
+  const start: Sandbox["start"] = (args, opts = {}) => {
+    const child = spawn(process.execPath, [CLI, ...args], {
+      env: { ...env, ...opts.env },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
+    const run: RunningCli = {
+      child,
+      stdout: "",
+      stderr: "",
+      done: new Promise((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code) => resolve({ code, stdout: run.stdout, stderr: run.stderr }));
+      }),
+      async until(text, ms = 15_000) {
+        const end = Date.now() + ms;
+        while (!run.stdout.includes(text)) {
+          if (Date.now() > end) throw new Error(`timed out waiting for ${text}: ${run.stdout}`);
+          await new Promise((r) => setTimeout(r, 25));
+        }
+      },
+    };
+    child.stdout?.setEncoding("utf8").on("data", (c: string) => (run.stdout += c));
+    child.stderr?.setEncoding("utf8").on("data", (c: string) => (run.stderr += c));
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(opts.stdin ?? "");
+    return run;
+  };
+  const cli: Sandbox["cli"] = (args, opts) => start(args, opts).done;
 
   const sandbox: Sandbox = {
     dir,
@@ -74,6 +98,7 @@ export function makeSandbox(keystore: "keyfile" | "os" = "keyfile"): Sandbox {
     clipboard,
     env,
     cli,
+    start,
     async daemonPid() {
       const client = await connect(ipcEndpoint(getPaths({ AGENT_VAULT_HOME: home }))).catch(
         () => null,
@@ -111,4 +136,18 @@ export function alive(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/**
+ * The environment block of a running process, or null where it cannot be read (Windows).
+ * Linux: /proc. macOS: `ps eww`, which prints it for processes of the same user.
+ */
+export function environOf(pid: number): string | null {
+  if (process.platform === "linux") {
+    return fs.readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").join("\n");
+  }
+  if (process.platform === "darwin") {
+    return execFileSync("ps", ["eww", "-p", String(pid)], { encoding: "utf8" });
+  }
+  return null;
 }

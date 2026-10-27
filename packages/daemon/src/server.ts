@@ -368,7 +368,7 @@ function serveConnection({ socket, token, dispatch, limits }: Conn): void {
 export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandle> {
   const { paths, store } = opts;
   const endpoint = opts.endpoint ?? ipcEndpoint(paths);
-  const state: DaemonState = { vault: null, initializing: false, closed: false };
+  const state: DaemonState = { vault: null, initializing: false, locked: false, closed: false };
   // First and synchronous: of several daemons started at once, exactly one gets past this line.
   const releaseLock = acquireLock(paths.runtimeDir);
 
@@ -382,9 +382,8 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
     try {
       state.vault = await openVault({ paths, store });
     } catch (err) {
-      if (!(err instanceof VaultNotInitializedError || err instanceof RootKeyMissingError)) {
-        throw err;
-      }
+      if (err instanceof RootKeyMissingError) state.locked = true;
+      else if (!(err instanceof VaultNotInitializedError)) throw err;
     }
     const dispatch = createDispatcher({
       registry: opts.methods ?? defaultRegistry,

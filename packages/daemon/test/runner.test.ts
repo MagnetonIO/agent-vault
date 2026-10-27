@@ -434,6 +434,20 @@ let i = 0;
       expect(await run.result).toEqual({ exitCode: 143, signal: "SIGTERM" });
     });
 
+    test.runIf(!POSIX)("run.signal ends the tree on Windows and reports the signal", async () => {
+      for (const [signal, exitCode] of [
+        ["SIGINT", 130],
+        ["SIGTERM", 143],
+      ] as const) {
+        const run = startRun(env.client, {
+          argv: nodeE("console.log('up'); setInterval(() => {}, 1000)"),
+        });
+        await run.seen("stdout", "up");
+        await env.client.call("run.signal", { runId: run.runId, signal });
+        expect(await run.result).toEqual({ exitCode, signal });
+      }
+    });
+
     test("run.signal rejects a signal outside the allowed set", async () => {
       const run = startRun(env.client, {
         argv: nodeE("console.log('up'); process.stdin.resume()"),

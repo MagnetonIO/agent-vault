@@ -3,7 +3,7 @@ import path from "node:path";
 import { connect } from "@agent-vault/daemon";
 import { getPaths, ipcEndpoint } from "@agent-vault/platform";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { alive, makeSandbox, PASSPHRASE, type Sandbox } from "./harness.js";
+import { alive, environOf, makeSandbox, PASSPHRASE, type Sandbox } from "./harness.js";
 
 // Each call starts node, and the first one in a sandbox also starts the daemon (Argon2id on the
 // keyfile, icacls on Windows).
@@ -292,6 +292,84 @@ describe("agent-vault CLI", { timeout: TIMEOUT_MS }, () => {
     expect(res.code).toBe(2);
   });
 
+  test("grab trims a single line but keeps a multi-line value exactly", async () => {
+    fs.writeFileSync(sb.clipboard, "  \t single-line-token-value \r\n");
+    const one = await sb.cli(["grab", "trim/one"]);
+    expect(one.stdout).toMatch(/ · 23 chars$/m);
+
+    const pem = "-----BEGIN KEY-----\nQUJDREVGR0g=\n-----END KEY-----\n";
+    fs.writeFileSync(sb.clipboard, pem);
+    const multi = await sb.cli(["grab", "trim/pem", "--tag", "helper"]);
+    expect(multi.stdout).toContain(` · ${pem.length} chars`);
+    // The final newline is part of the value (helper adds its own).
+    expect((await sb.cli(["helper", "trim/pem"])).stdout).toBe(`${pem}\n`);
+  });
+
+  test("grab refuses whitespace and text that is not UTF-8", async () => {
+    fs.writeFileSync(sb.clipboard, " \n\t \r\n");
+    const blank = await sb.cli(["grab", "bad/blank"]);
+    expect(blank.code).toBe(1);
+    expect(blank.stderr).toContain("clipboard is empty");
+
+    fs.writeFileSync(sb.clipboard, Buffer.from([0x61, 0xff, 0xfe, 0x62, 0x63, 0x64, 0x65, 0x66]));
+    const binary = await sb.cli(["grab", "bad/binary"]);
+    expect(binary.code).toBe(1);
+    expect(binary.stderr).toContain("clipboard is not text");
+    expect((await sb.cli(["list"])).stdout).not.toContain("bad/");
+  });
+
+  test("run --env: a bad argument is echoed whole, a repeated name is exit 2", async () => {
+    const bad = await sb.cli(["run", "--env", "oops-no-equals", "--", "node", "-e", "0"]);
+    expect(bad.code).toBe(2);
+    expect(bad.stderr).toContain("got: oops-no-equals");
+    const twice = await sb.cli([
+      "run",
+      "--env",
+      "A=vault://svc/key",
+      "--env",
+      "A=vault://anthropic",
+      "--",
+      "node",
+      "-e",
+      "0",
+    ]);
+    expect(twice.code).toBe(2);
+    expect(twice.stderr).toContain("A given more than once");
+  });
+
+  test("run relays Ctrl-C to the child and returns the child's code", async () => {
+    const child = sb.start([
+      "run",
+      "--",
+      "node",
+      "-e",
+      "process.on('SIGINT',()=>{console.log('got-int');process.exit(5)});console.log('ready');setInterval(()=>{},1000)",
+    ]);
+    await child.until("ready");
+    child.child.kill("SIGINT");
+    const res = await child.done;
+    expect(res.code).toBe(5);
+    expect(res.stdout).toContain("got-int");
+  });
+
+  test("run: the 2nd Ctrl-C sends SIGTERM and the 3rd leaves with 130", async () => {
+    const child = sb.start([
+      "run",
+      "--",
+      "node",
+      "-e",
+      "process.on('SIGINT',()=>console.log('got-int'));process.on('SIGTERM',()=>console.log('got-term'));console.log('ready');setInterval(()=>{},1000)",
+    ]);
+    await child.until("ready");
+    child.child.kill("SIGINT");
+    await child.until("got-int");
+    child.child.kill("SIGINT");
+    await child.until("got-term");
+    child.child.kill("SIGINT");
+    const res = await child.done;
+    expect(res.code).toBe(130);
+  });
+
   test("daemon run exits 0 when a daemon already runs", async () => {
     expect(await sb.daemonPid()).not.toBeNull();
     const res = await sb.cli(["daemon", "run"]);
@@ -332,6 +410,55 @@ describe("agent-vault CLI", { timeout: TIMEOUT_MS }, () => {
   });
 });
 
+describe("the keyfile passphrase", () => {
+  const sb = sandbox();
+  const NOT_IN_ENVIRON = [PASSPHRASE, "7731", "AGENT_VAULT_KEYFILE_PASSPHRASE"];
+
+  /** The daemon's environment block, which any process of the same user can read. */
+  async function daemonEnviron(): Promise<string | null> {
+    const pid = await sb.daemonPid();
+    expect(pid).not.toBeNull();
+    const environ = environOf(pid as number);
+    if (environ !== null) {
+      // The reader works: it sees the variables the daemon was spawned with.
+      expect(environ).toContain("AGENT_VAULT_HOME=");
+    }
+    return environ;
+  }
+
+  test("is not in vaultd's environment after init, nor after an autostarted status", async () => {
+    // The CLI itself holds it in its env here; it must not reach the daemon that way.
+    const init = await sb.cli(["init", "--keystore", "keyfile"]);
+    expect(init.code, init.stderr).toBe(0);
+    const afterInit = await daemonEnviron();
+    for (const text of NOT_IN_ENVIRON) expect(afterInit ?? "").not.toContain(text);
+
+    await sb.stopDaemon();
+    expect((await sb.cli(["status"])).code).toBe(0);
+    const afterStatus = await daemonEnviron();
+    for (const text of NOT_IN_ENVIRON) expect(afterStatus ?? "").not.toContain(text);
+  });
+
+  test("a wrong one says to recover, and does not blame vaultd.lock", async () => {
+    await sb.stopDaemon();
+    const wrong = await sb.cli(["list"], {
+      env: { AGENT_VAULT_KEYFILE_PASSPHRASE: "not the one" },
+    });
+    expect(wrong.code).toBe(1);
+    expect(wrong.stderr).toContain(
+      "wrong keyfile passphrase; if it is lost, run: agent-vault recover",
+    );
+    expect(wrong.stderr).not.toContain("vaultd.lock");
+
+    const direct = await sb.cli(["daemon", "run"], {
+      env: { AGENT_VAULT_KEYFILE_PASSPHRASE: "not the one" },
+    });
+    expect(direct.code).toBe(3);
+    expect(direct.stderr).toContain("wrong keyfile passphrase");
+    expect(await sb.daemonPid()).toBeNull();
+  });
+});
+
 describe("recovery after the device key is lost", { timeout: TIMEOUT_MS }, () => {
   const sb = sandbox();
 
@@ -349,7 +476,11 @@ describe("recovery after the device key is lost", { timeout: TIMEOUT_MS }, () =>
     const fresh = { AGENT_VAULT_KEYFILE_PASSPHRASE: "a different passphrase 99" };
     const locked = await sb.cli(["list"], { env: fresh });
     expect(locked.code).toBe(1);
-    expect(locked.stderr).toContain("agent-vault recover");
+    expect(locked.stderr).toContain("vault is locked; run: agent-vault recover");
+    expect((await sb.cli(["status"], { env: fresh })).stdout).toMatch(/locked\s+yes/);
+    const reinit = await sb.cli(["init", "--keystore", "keyfile"], { env: fresh });
+    expect(reinit.code).toBe(1);
+    expect(reinit.stderr).toContain("vault is locked; run: agent-vault recover");
 
     const client = await connect(ipcEndpoint(getPaths({ AGENT_VAULT_HOME: sb.home })));
     try {

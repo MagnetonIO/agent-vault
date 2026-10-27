@@ -147,13 +147,16 @@ export async function readLineFromTty(prompt: string, io: TtyIo = defaultIo()): 
 }
 
 /** The passphrase for the keyfile store: asked twice when the keyfile does not exist yet. */
-export async function promptPassphrase(confirm: boolean): Promise<string> {
+export async function promptPassphrase(
+  confirm: boolean,
+  label = "Keyfile passphrase",
+): Promise<string> {
   const decode = (bytes: Uint8Array) => {
     const text = new TextDecoder().decode(bytes);
     bytes.fill(0);
     return text;
   };
-  const first = decode(await readSecretFromTty("Keyfile passphrase: "));
+  const first = decode(await readSecretFromTty(`${label}: `));
   if (first === "") throw new CliError("the passphrase is empty");
   if (confirm) {
     const again = decode(await readSecretFromTty("Repeat the passphrase: "));

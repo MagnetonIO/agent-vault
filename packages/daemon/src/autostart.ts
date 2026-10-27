@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ipcEndpoint, type VaultPaths } from "@agent-vault/platform";
 import { connect, type IpcClient } from "./client.js";
-import { DaemonIdentityError } from "./errors.js";
+import { DaemonExitedError, DaemonIdentityError } from "./errors.js";
 import { lockPath } from "./lock.js";
 
 const RETRY_INTERVAL_MS = 100;
@@ -21,13 +21,28 @@ export type EnsureDaemonOptions = {
   spawnArgv?: string[] | undefined;
   /** How long to wait for a spawned daemon. Default `defaultTimeoutMs()`: 3000, 10000 on Windows. */
   timeoutMs?: number | undefined;
+  /**
+   * Bytes (plus a newline) to write to the spawned daemon's stdin, which is then closed; the
+   * buffer is zeroed afterwards. This is how a secret such as the keyfile passphrase reaches a
+   * daemon without sitting in its environment for its whole life, where any process of the same
+   * user can read it. Setting it adds `--passphrase-stdin` to the default argv.
+   */
+  stdinPayload?: Uint8Array | undefined;
+  /** The spawned daemon's environment. Default: this process's. */
+  env?: NodeJS.ProcessEnv | undefined;
 };
 
 /** The CLI that is running now, asked to run the daemon (Task 14 provides `daemon run`). */
-function defaultArgv(): string[] {
+function defaultArgv(withStdinPassphrase: boolean): string[] {
   const entry = process.argv[1];
   if (!entry) throw new Error("cannot tell which CLI to spawn: process.argv[1] is empty");
-  return [process.execPath, entry, "daemon", "run"];
+  return [
+    process.execPath,
+    entry,
+    "daemon",
+    "run",
+    ...(withStdinPassphrase ? ["--passphrase-stdin"] : []),
+  ];
 }
 
 /**
@@ -45,10 +60,22 @@ export async function ensureDaemon(
     // Not running (or not answering): start one below.
   }
 
-  const [cmd, ...args] = opts.spawnArgv ?? defaultArgv();
+  const payload = opts.stdinPayload;
+  const [cmd, ...args] = opts.spawnArgv ?? defaultArgv(payload !== undefined);
   if (!cmd) throw new Error("spawnArgv is empty");
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
-  const child = spawn(cmd, args, { detached: true, stdio: "ignore", windowsHide: true });
+  const child = spawn(cmd, args, {
+    detached: true,
+    stdio: [payload ? "pipe" : "ignore", "ignore", "ignore"],
+    windowsHide: true,
+    ...(opts.env !== undefined && { env: opts.env }),
+  });
+  if (payload) {
+    const line = Buffer.concat([payload, Buffer.from("\n")]);
+    child.stdin?.on("error", () => {}); // EPIPE if the daemon is already gone
+    child.stdin?.end(line, () => line.fill(0));
+    payload.fill(0);
+  }
   let spawnError: Error | undefined;
   child.on("error", (err) => {
     spawnError = err;
@@ -56,8 +83,11 @@ export async function ensureDaemon(
   // An exit with code 0 means the child lost the race to another daemon: keep trying to connect.
   // Any other exit before a connect succeeds is a failed start.
   let failedExit: string | undefined;
+  let failedCode: number | null = null;
   child.on("exit", (code, signal) => {
-    if (code !== 0) failedExit = code === null ? `signal ${signal}` : `code ${code}`;
+    if (code === 0) return;
+    failedExit = code === null ? `signal ${signal}` : `code ${code}`;
+    failedCode = code;
   });
   child.unref();
 
@@ -73,8 +103,9 @@ export async function ensureDaemon(
     }
     // Checked after the connect attempt: another instance may have come up while this one failed.
     if (failedExit) {
-      throw new Error(
+      throw new DaemonExitedError(
         `vaultd exited with ${failedExit} before it started; if a stale lock is the cause, delete ${lockPath(paths.runtimeDir)}`,
+        failedCode,
       );
     }
   }

@@ -4,10 +4,12 @@ import type { CaptureService } from "../capture-page.js";
 import type { Connection } from "../connection.js";
 import type { RunnerService } from "../runner.js";
 
-/** What the daemon holds between calls. `vault` is null until `vault.init` has run. */
+/** What the daemon holds between calls. `vault` is null until `vault.init` or `vault.recover` has run. */
 export type DaemonState = {
   vault: Vault | null;
   initializing: boolean;
+  /** A vault exists on disk but this device's root key is missing (see `vault.recover`). */
+  locked: boolean;
   closed: boolean;
 };
 
@@ -30,7 +32,7 @@ export type Ctx = {
   /** The connection making this call; runs belong to the one that started them. */
   readonly connection: Connection;
   readonly audit: AuditFields;
-  /** The open vault; throws VaultNotInitializedError before `vault.init`. */
+  /** The open vault; throws VaultNotInitializedError before `vault.init`, VaultLockedError when locked. */
   vault(): Vault;
   /** Close the daemon once the reply to this call has been written. */
   requestStop(): void;

@@ -1,5 +1,5 @@
 import { initVault, recoverVault, VaultExistsError } from "@agent-vault/core";
-import { RpcError } from "../errors.js";
+import { RpcError, VaultLockedError } from "../errors.js";
 import { ERR } from "../rpc.js";
 import { VERSION } from "../version.js";
 import { invalid, paramsObject, reqString } from "./params.js";
@@ -28,6 +28,7 @@ export const vaultMethods: Registry = {
       paramsObject(params, []);
       return {
         initialized: ctx.state.vault !== null,
+        locked: ctx.state.locked,
         keystore: ctx.store.kind,
         version: VERSION,
         pid: process.pid,
@@ -44,6 +45,7 @@ export const vaultMethods: Registry = {
       if (reqString(p, "keystore") !== ctx.store.kind) {
         throw invalid("keystore", "does not match the daemon's key store");
       }
+      if (ctx.state.locked) throw new VaultLockedError();
       if (ctx.state.vault || ctx.state.initializing) throw new VaultExistsError();
       ctx.state.initializing = true;
       try {
@@ -78,6 +80,7 @@ export const vaultMethods: Registry = {
         } else {
           const previous = ctx.state.vault;
           ctx.state.vault = vault;
+          ctx.state.locked = false;
           previous?.close();
         }
         return { ok: true };

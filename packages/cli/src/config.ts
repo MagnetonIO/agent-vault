@@ -14,6 +14,12 @@ export const STORE_KIND: Record<KeystoreChoice, string> = { os: "os-keyring", ke
 /** The headless unlock for the keyfile store (AGENTS.md). Never used for a secret. */
 export const PASSPHRASE_ENV = "AGENT_VAULT_KEYFILE_PASSPHRASE";
 
+/** `daemon run` exits with this when the keyfile passphrase is wrong; a spawner reads it. */
+export const EXIT_WRONG_PASSPHRASE = 3;
+
+export const WRONG_PASSPHRASE_MESSAGE =
+  "wrong keyfile passphrase; if it is lost, run: agent-vault recover";
+
 export const configPath = (paths: VaultPaths): string => path.join(paths.dataDir, "config.json");
 
 /** The keyfile always lives here, whatever else moves. */

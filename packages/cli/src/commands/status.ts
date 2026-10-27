@@ -2,7 +2,13 @@ import type { Command } from "commander";
 import { withDaemon } from "../context.js";
 import { say, table } from "../output.js";
 
-type Status = { initialized: boolean; keystore: string; version: string; pid: number };
+type Status = {
+  initialized: boolean;
+  locked: boolean;
+  keystore: string;
+  version: string;
+  pid: number;
+};
 
 export function statusCommand(program: Command): void {
   program
@@ -12,6 +18,7 @@ export function statusCommand(program: Command): void {
       const s = await withDaemon((client) => client.call<Status>("status"));
       const rows = [
         ["initialized", s.initialized ? "yes" : "no"],
+        ["locked", s.locked ? "yes (run: agent-vault recover)" : "no"],
         ["key store", s.keystore],
         ["version", s.version],
         ["daemon pid", String(s.pid)],

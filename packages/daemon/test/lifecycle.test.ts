@@ -72,11 +72,16 @@ describe.each(MODES)("daemon lifecycle over %s", (mode) => {
       const { words, restarted } = await lostKey();
       const client = await connect(env.endpoint);
       try {
-        expect(await client.call("status")).toMatchObject({ initialized: false });
-        expect((await rpcError(client.call("secret.list"))).message).toMatch(/no vault/);
+        expect(await client.call("status")).toMatchObject({ initialized: false, locked: true });
+        const locked = await rpcError(client.call("secret.list"));
+        expect(locked.message).toBe("vault is locked; run: agent-vault recover");
+        expect(locked.data).toEqual({ name: "VaultLockedError" });
+        // init must not pave over a vault this device merely cannot open.
+        const init = await rpcError(client.call("vault.init", { keystore: "memory" }));
+        expect(init.message).toBe("vault is locked; run: agent-vault recover");
 
         expect(await client.call("vault.recover", { words })).toEqual({ ok: true });
-        expect(await client.call("status")).toMatchObject({ initialized: true });
+        expect(await client.call("status")).toMatchObject({ initialized: true, locked: false });
         expect(await client.call("secret.list")).toMatchObject([
           { name: "kept/secret", length: VALUE.length },
         ]);
@@ -95,7 +100,7 @@ describe.each(MODES)("daemon lifecycle over %s", (mode) => {
         const err = await rpcError(client.call("vault.recover", { words: wrong }));
         expect(err.message).toBe("recovery words are not valid for this vault");
         for (const w of words) expect(err.message).not.toContain(` ${w} `);
-        expect(await client.call("status")).toMatchObject({ initialized: false });
+        expect(await client.call("status")).toMatchObject({ initialized: false, locked: true });
       } finally {
         client.close();
         await restarted.close();

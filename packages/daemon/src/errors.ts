@@ -74,3 +74,25 @@ export class RunError extends Error {
     this.name = "RunError";
   }
 }
+
+/**
+ * The daemon this call started exited before it answered. `exitCode` is its exit code
+ * (null: it was killed by a signal), so a caller can tell a wrong passphrase from a crash.
+ */
+export class DaemonExitedError extends Error {
+  readonly exitCode: number | null;
+
+  constructor(message: string, exitCode: number | null) {
+    super(message);
+    this.name = "DaemonExitedError";
+    this.exitCode = exitCode;
+  }
+}
+
+/** The vault exists but this device's root key is gone: only `vault.recover` can open it. */
+export class VaultLockedError extends Error {
+  constructor() {
+    super("vault is locked; run: agent-vault recover");
+    this.name = "VaultLockedError";
+  }
+}

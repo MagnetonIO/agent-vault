@@ -10,14 +10,18 @@ import { collect } from "./set.js";
 /** Stay well under the daemon's 1 MiB request line once base64 and JSON framing are added. */
 const STDIN_SLICE_BYTES = 256 * 1024;
 
-/** `K=vault://x` pairs into the `env` map of `run.start`. */
+/**
+ * `K=vault://x` pairs into the `env` map of `run.start`. A reference is a name, not a secret, so
+ * a bad argument is echoed whole.
+ */
 export function parseEnvRefs(pairs: string[]): Record<string, string> {
   const env: Record<string, string> = {};
   for (const pair of pairs) {
     const eq = pair.indexOf("=");
-    if (eq < 1)
-      throw new CliError(`--env expects NAME=vault://secret, got: ${pair.split("=")[0]}`, 2);
-    Object.defineProperty(env, pair.slice(0, eq), {
+    if (eq < 1) throw new CliError(`--env expects NAME=vault://secret, got: ${pair}`, 2);
+    const name = pair.slice(0, eq);
+    if (Object.hasOwn(env, name)) throw new CliError(`--env ${name} given more than once`, 2);
+    Object.defineProperty(env, name, {
       value: pair.slice(eq + 1),
       enumerable: true,
       writable: true,
@@ -36,9 +40,16 @@ function baseEnv(): Record<string, string> {
   return env;
 }
 
-/** Send this process's stdin to the child, one awaited call at a time, then its end. */
+/**
+ * Send this process's stdin to the child, one awaited call at a time, then its end. A terminal is
+ * not forwarded: the child gets end-of-input at once rather than waiting on keys nobody relays.
+ */
 async function forwardStdin(client: IpcClient, runId: string): Promise<void> {
   try {
+    if (process.stdin.isTTY) {
+      await client.call("run.stdin", { runId, end: true });
+      return;
+    }
     for await (const chunk of process.stdin as AsyncIterable<Buffer>) {
       for (let at = 0; at < chunk.length; at += STDIN_SLICE_BYTES) {
         const dataB64 = chunk.subarray(at, at + STDIN_SLICE_BYTES).toString("base64");
@@ -76,8 +87,17 @@ export function runCommand(program: Command): void {
           if (method !== "run.output" || p.runId !== runId || typeof p.data !== "string") return;
           (p.stream === "stderr" ? process.stderr : process.stdout).write(p.data);
         });
+        // The first signal goes to the child as it came, the second asks harder (SIGTERM), the
+        // third gives up: the CLI leaves and the daemon, seeing the connection drop, ends the tree.
+        let signals = 0;
         const relay = (signal: "SIGINT" | "SIGTERM") => () => {
-          client.call("run.signal", { runId, signal }).catch(() => {});
+          signals++;
+          if (signals >= 3) {
+            void exitWith(130);
+            return;
+          }
+          const sent = signals === 1 ? signal : "SIGTERM";
+          client.call("run.signal", { runId, signal: sent }).catch(() => {});
         };
         const onInt = relay("SIGINT");
         const onTerm = relay("SIGTERM");

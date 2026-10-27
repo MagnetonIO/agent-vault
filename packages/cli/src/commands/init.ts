@@ -1,10 +1,9 @@
-import { connect, type IpcClient } from "@agent-vault/daemon";
-import { getPaths, ipcEndpoint } from "@agent-vault/platform";
+import type { IpcClient } from "@agent-vault/daemon";
+import { getPaths } from "@agent-vault/platform";
 import type { Command } from "commander";
 import {
   KEYSTORE_CHOICES,
   type KeystoreChoice,
-  PASSPHRASE_ENV,
   readConfig,
   restoreConfig,
   STORE_KIND,
@@ -14,7 +13,6 @@ import {
 import { daemonClient } from "../context.js";
 import { CliError } from "../errors.js";
 import { say, warn } from "../output.js";
-import { isTty, promptPassphrase } from "../tty.js";
 
 const WORDS_PER_LINE = 4;
 
@@ -33,12 +31,6 @@ export function formatWords(words: string[]): string[] {
   return lines;
 }
 
-async function isRunning(): Promise<boolean> {
-  const client = await connect(ipcEndpoint(getPaths())).catch(() => null);
-  client?.close();
-  return client !== null;
-}
-
 export function initCommand(program: Command): void {
   program
     .command("init")
@@ -51,17 +43,6 @@ export function initCommand(program: Command): void {
         throw new CliError(`--keystore must be one of: ${KEYSTORE_CHOICES.join(", ")}`, 2);
       }
       const keystore = requested as KeystoreChoice;
-
-      // The keyfile passphrase has to be settled before a daemon is started: it is inherited.
-      if (keystore === "keyfile" && !process.env[PASSPHRASE_ENV] && !(await isRunning())) {
-        if (!isTty()) {
-          throw new CliError(
-            `keyfile store needs a passphrase: set ${PASSPHRASE_ENV} or run this in a terminal`,
-            2,
-          );
-        }
-        process.env[PASSPHRASE_ENV] = await promptPassphrase(true);
-      }
 
       // The daemon reads the config when it starts. If init does not complete, the old config goes
       // back: a vault made under one key store must never be pointed at another.

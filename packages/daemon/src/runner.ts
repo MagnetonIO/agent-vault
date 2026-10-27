@@ -259,6 +259,8 @@ type Active = {
   unwatch: () => void;
   /** A `run.stdin` is waiting for the child to take its data. */
   stdinBusy: boolean;
+  /** The signal a `run.signal` sent. Windows cannot report it from the exit, so it is kept here. */
+  signaled: NodeJS.Signals | undefined;
 };
 
 export type RunnerService = {
@@ -304,8 +306,8 @@ function treeAlive(child: ChildProcess): boolean {
 
 /**
  * Signal the child and everything it started. POSIX: the child leads its own process group (see
- * `detached` below), so the signal goes to `-pgid`. Windows has no groups: SIGTERM and SIGKILL run
- * `taskkill /T /F` on the pid (no shell); a SIGINT cannot be delivered and is plain `kill`.
+ * `detached` below), so the signal goes to `-pgid`. Windows has no groups and cannot deliver a
+ * signal: every signal, SIGINT included, runs `taskkill /T /F` on the pid (no shell).
  */
 function signalTree(child: ChildProcess, signal: NodeJS.Signals): void {
   const { pid } = child;
@@ -316,10 +318,6 @@ function signalTree(child: ChildProcess, signal: NodeJS.Signals): void {
     } catch {
       child.kill(signal); // the group is already gone
     }
-    return;
-  }
-  if (signal === "SIGINT") {
-    child.kill(signal);
     return;
   }
   const root = process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows";
@@ -416,6 +414,7 @@ export function createRunnerService(): RunnerService {
         killTimer: undefined,
         unwatch: () => {},
         stdinBusy: false,
+        signaled: undefined,
       };
       active.set(runId, entry);
       // From here the owner's connection decides how long the child lives.
@@ -460,7 +459,11 @@ export function createRunnerService(): RunnerService {
         child.once("spawn", () => {
           Promise.all([exited, flushed]).then(([{ code, signal }]) => {
             forget();
-            if (signal) {
+            if (WIN && entry.signaled !== undefined && code !== null) {
+              // taskkill /F ends the tree with exit code 1; report the signal that was sent.
+              const signo = os.constants.signals[entry.signaled] ?? 0;
+              resolve({ exitCode: 128 + signo, signal: entry.signaled });
+            } else if (signal) {
               resolve({ exitCode: 128 + (os.constants.signals[signal] ?? 0), signal });
             } else {
               resolve({ exitCode: code ?? 1 });
@@ -494,7 +497,9 @@ export function createRunnerService(): RunnerService {
     },
 
     signal(owner, runId, signal) {
-      signalTree(owned(owner, runId).child, signal);
+      const entry = owned(owner, runId);
+      entry.signaled = signal;
+      signalTree(entry.child, signal);
     },
 
     async close() {

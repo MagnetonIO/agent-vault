@@ -6,6 +6,7 @@ import { ipcEndpoint } from "@agent-vault/platform";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { defaultTimeoutMs, ensureDaemon } from "../src/autostart.js";
 import { connect } from "../src/client.js";
+import { DaemonExitedError } from "../src/errors.js";
 import { useTmp } from "./helpers.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -44,6 +45,7 @@ describe("ensureDaemon", () => {
         expect(Date.now() - started).toBeLessThan(defaultTimeoutMs());
         expect(await client.call("status")).toEqual({
           initialized: false,
+          locked: false,
           keystore: "keyfile",
           version: "0.0.0",
           pid: expect.any(Number),
@@ -111,6 +113,38 @@ describe("ensureDaemon", () => {
     expect(err?.message).toMatch(/exited with code 7/);
     expect(err?.message).toContain(path.join(tmp.paths.runtimeDir, "vaultd.lock"));
     expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  test("a failed start carries the child's exit code", async () => {
+    const err = await ensureDaemon(tmp.paths, {
+      spawnArgv: [process.execPath, "-e", "process.exit(3)"],
+      timeoutMs: 10_000,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(DaemonExitedError);
+    expect((err as DaemonExitedError).exitCode).toBe(3);
+  });
+
+  test("stdinPayload reaches the child's stdin, not its environment, and is zeroed", async () => {
+    const out = path.join(tmp.dir, "child-saw.json");
+    const script =
+      "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>require('fs').writeFileSync(" +
+      "process.env.OUT,JSON.stringify({d,env:Object.keys(process.env)})))";
+    const payload = Buffer.from("payload-secret-77");
+    await expect(
+      ensureDaemon(tmp.paths, {
+        spawnArgv: [process.execPath, "-e", script],
+        stdinPayload: payload,
+        env: { ...process.env, AGENT_VAULT_KEYFILE_PASSPHRASE: undefined, OUT: out },
+        timeoutMs: 1500,
+      }),
+    ).rejects.toThrow();
+    const saw = JSON.parse(fs.readFileSync(out, "utf8")) as { d: string; env: string[] };
+    expect(saw.d).toBe("payload-secret-77\n");
+    expect(saw.env).not.toContain("AGENT_VAULT_KEYFILE_PASSPHRASE");
+    expect(payload.every((b) => b === 0)).toBe(true);
   });
 
   test("a child that exits 0 (lost the race) keeps being waited on", async () => {

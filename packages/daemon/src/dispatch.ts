@@ -33,6 +33,7 @@ import {
   RpcError,
   RunError,
   SecretNotTextError,
+  VaultLockedError,
 } from "./errors.js";
 import type { Ctx, DaemonState, Registry } from "./methods/index.js";
 import { ERR, type JsonRpcErrorObject } from "./rpc.js";
@@ -62,6 +63,7 @@ const APP_ERRORS: readonly (abstract new (...args: never[]) => Error)[] = [
   HelperNotAllowedError,
   RunError,
   SecretNotTextError,
+  VaultLockedError,
 ];
 
 /** Before `vault.init` only these work. */
@@ -119,6 +121,10 @@ export function createDispatcher({
   runner,
   requestStop,
 }: Deps): Dispatcher {
+  /** Why there is no open vault: none was made yet, or this device cannot open it. */
+  const absentVault = (): Error =>
+    state.locked ? new VaultLockedError() : new VaultNotInitializedError();
+
   function record(method: string, params: unknown, ctx: Ctx, outcome: AuditInput["outcome"]) {
     if (!state.vault) return;
     appendAudit(state.vault, {
@@ -140,7 +146,7 @@ export function createDispatcher({
   ): Promise<unknown> {
     const def = Object.hasOwn(registry, method) ? registry[method] : undefined;
     if (!def) throw new RpcError(ERR.METHOD_NOT_FOUND, "method not found");
-    if (!state.vault && !WORKS_UNINITIALIZED.has(method)) throw new VaultNotInitializedError();
+    if (!state.vault && !WORKS_UNINITIALIZED.has(method)) throw absentVault();
 
     const ctx: Ctx = {
       paths,
@@ -151,7 +157,7 @@ export function createDispatcher({
       connection,
       audit: {},
       vault() {
-        if (!state.vault) throw new VaultNotInitializedError();
+        if (!state.vault) throw absentVault();
         return state.vault;
       },
       requestStop,

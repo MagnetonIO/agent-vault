@@ -47,6 +47,7 @@ describe.each(MODES)("daemon over %s", (mode) => {
     test("status works and reports the key store", async () => {
       expect(await env.client.call("status")).toEqual({
         initialized: false,
+        locked: false,
         keystore: "memory",
         version: "0.0.0",
         pid: process.pid,
