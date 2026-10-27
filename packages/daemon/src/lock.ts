@@ -1,11 +1,50 @@
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { ensurePrivateDir } from "@agent-vault/platform";
 import { DaemonAlreadyRunningError } from "./errors.js";
 
 /** An empty or unparseable lock this old is a crashed starter's, not one mid-write. */
 const STALE_UNPARSEABLE_MS = 5000;
+/** Windows has no boot id; two readings of "now minus uptime" agree to within this. */
+const WIN_BOOT_TOLERANCE_MS = 60_000;
+
+export const lockPath = (runtimeDir: string): string => path.join(runtimeDir, "vaultd.lock");
+
+/**
+ * Identifies this boot of the machine, so a lock left by a pid from before a reboot is not
+ * mistaken for a live daemon when the OS hands the pid to something else. "" if unreadable, which
+ * `sameBoot` treats as "cannot tell", never as "different".
+ *   Linux: /proc/sys/kernel/random/boot_id. macOS: kern.bootsessionuuid.
+ *   Windows: `win:<boot time in ms>`, compared with a tolerance.
+ */
+export function readBootId(platform: NodeJS.Platform = process.platform): string {
+  try {
+    if (platform === "linux") {
+      return fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    }
+    if (platform === "darwin") {
+      return execFileSync("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    }
+    if (platform === "win32") return `win:${Math.round(Date.now() - os.uptime() * 1000)}`;
+  } catch {
+    // fall through
+  }
+  return "";
+}
+
+export function sameBoot(a: string, b: string): boolean {
+  if (a === "" || b === "") return true;
+  if (a.startsWith("win:") && b.startsWith("win:")) {
+    return Math.abs(Number(a.slice(4)) - Number(b.slice(4))) <= WIN_BOOT_TOLERANCE_MS;
+  }
+  return a === b;
+}
 
 /** EPERM means the process exists but belongs to someone else: still alive. */
 function isAlive(pid: number): boolean {
@@ -17,24 +56,59 @@ function isAlive(pid: number): boolean {
   }
 }
 
-/** Create the lock file holding our pid. False if it already exists. */
-function tryCreate(file: string): boolean {
+type LockInfo = { pid: number; bootId: string; startedAt: string };
+
+function parseLock(text: string): LockInfo | null {
+  try {
+    const v = JSON.parse(text) as Partial<LockInfo> | null;
+    if (
+      v &&
+      typeof v === "object" &&
+      Number.isInteger(v.pid) &&
+      (v.pid as number) > 0 &&
+      typeof v.bootId === "string"
+    ) {
+      return v as LockInfo;
+    }
+  } catch {
+    // not JSON
+  }
+  return null;
+}
+
+/** Create the lock file. Returns what it holds, or null if it already exists. */
+function tryCreate(file: string): string | null {
+  const text = JSON.stringify({
+    pid: process.pid,
+    bootId: readBootId(),
+    startedAt: new Date().toISOString(),
+  } satisfies LockInfo);
   let fd: number;
   try {
     fd = fs.openSync(file, "wx", 0o600);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return null;
     throw err;
   }
   try {
-    fs.writeSync(fd, String(process.pid));
+    fs.writeSync(fd, text);
   } catch (err) {
     fs.closeSync(fd);
     fs.rmSync(file, { force: true });
     throw err;
   }
   fs.closeSync(fd);
-  return true;
+  return text;
+}
+
+/** Is the lock's holder gone? A live pid from this boot is never stale, whatever else is true. */
+function isStale(text: string, mtimeMs: number): boolean {
+  const info = parseLock(text);
+  if (info) return !isAlive(info.pid) || !sameBoot(info.bootId, readBootId());
+  // Legacy lock (a bare pid) or garbage.
+  const trimmed = text.trim();
+  if (/^\d+$/.test(trimmed) && Number(trimmed) > 0) return !isAlive(Number(trimmed));
+  return Date.now() - mtimeMs > STALE_UNPARSEABLE_MS;
 }
 
 /**
@@ -52,10 +126,7 @@ function reapStale(file: string): boolean {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
     throw err;
   }
-  const trimmed = text.trim();
-  const pid = /^\d+$/.test(trimmed) ? Number(trimmed) : 0;
-  const stale = pid > 0 ? !isAlive(pid) : Date.now() - mtimeMs > STALE_UNPARSEABLE_MS;
-  if (!stale) return false;
+  if (!isStale(text, mtimeMs)) return false;
 
   const aside = `${file}.stale.${process.pid}.${randomBytes(4).toString("hex")}`;
   try {
@@ -79,23 +150,22 @@ function reapStale(file: string): boolean {
 }
 
 /**
- * Take the single-instance lock `<runtimeDir>/vaultd.lock`, holding this process's pid. Synchronous,
- * so concurrent starters (even in one process) are strictly ordered. Throws
- * DaemonAlreadyRunningError if a live process holds it. Returns the release function, which only
- * removes the file while it still holds our pid.
+ * Take the single-instance lock `<runtimeDir>/vaultd.lock`, which holds `{ pid, bootId, startedAt }`.
+ * Synchronous, so concurrent starters (even in one process) are strictly ordered.
  *
- * A pid that the OS has reused for an unrelated live process keeps a stale lock alive; delete
- * `vaultd.lock` by hand in that case.
+ * An existing lock is reaped once, and only if its pid is dead or it was written in an earlier
+ * boot. A live pid from this boot is never reaped, even if it is not really a daemon (a reused
+ * pid): that throws DaemonAlreadyRunningError naming the file so the user can delete it. Returns
+ * the release function, which only removes the file while it still holds what we wrote.
  */
 export function acquireLock(runtimeDir: string): () => void {
   ensurePrivateDir(runtimeDir);
-  const file = path.join(runtimeDir, "vaultd.lock");
-  if (!tryCreate(file) && !(reapStale(file) && tryCreate(file))) {
-    throw new DaemonAlreadyRunningError();
-  }
+  const file = lockPath(runtimeDir);
+  const written = tryCreate(file) ?? (reapStale(file) ? tryCreate(file) : null);
+  if (written === null) throw new DaemonAlreadyRunningError(file);
   return () => {
     try {
-      if (fs.readFileSync(file, "utf8") === String(process.pid)) fs.rmSync(file, { force: true });
+      if (fs.readFileSync(file, "utf8") === written) fs.rmSync(file, { force: true });
     } catch {
       // already gone
     }

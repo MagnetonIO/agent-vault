@@ -81,6 +81,29 @@ describe("ensureDaemon", () => {
     expect(Date.now() - started).toBeLessThan(2500);
   });
 
+  test("a child that exits non-zero fails fast and names the lock file", async () => {
+    const started = Date.now();
+    const err = await ensureDaemon(tmp.paths, {
+      spawnArgv: [process.execPath, "-e", "process.exit(7)"],
+      timeoutMs: 10_000,
+    }).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+    expect(err?.message).toMatch(/exited with code 7/);
+    expect(err?.message).toContain(path.join(tmp.paths.runtimeDir, "vaultd.lock"));
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  test("a child that exits 0 (lost the race) keeps being waited on", async () => {
+    await expect(
+      ensureDaemon(tmp.paths, {
+        spawnArgv: [process.execPath, "-e", "process.exit(0)"],
+        timeoutMs: 500,
+      }),
+    ).rejects.toThrow(/did not start within 500 ms/);
+  });
+
   test("reports a command that cannot be spawned", async () => {
     await expect(
       ensureDaemon(tmp.paths, { spawnArgv: [path.join(tmp.dir, "no-such-binary")] }),

@@ -101,14 +101,10 @@ export class InvalidEnvNameError extends Error {
   }
 }
 
-/** An allowed executable must be given as an absolute path. */
+/** An allowed executable must be given as an absolute path. The message never repeats the input. */
 export class InvalidExePathError extends Error {
-  constructor(exePath: string) {
-    const shown =
-      exePath.length > MAX_NAME_IN_MESSAGE
-        ? `${exePath.slice(0, MAX_NAME_IN_MESSAGE)}...`
-        : exePath;
-    super(`executable path must be absolute: ${JSON.stringify(shown)}`);
+  constructor() {
+    super("exe path must be absolute");
     this.name = "InvalidExePathError";
   }
 }

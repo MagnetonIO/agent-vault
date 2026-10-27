@@ -3,6 +3,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { ipcEndpoint, type VaultPaths } from "@agent-vault/platform";
 import { connect, type IpcClient } from "./client.js";
 import { DaemonIdentityError } from "./errors.js";
+import { lockPath } from "./lock.js";
 
 const RETRY_INTERVAL_MS = 100;
 const DEFAULT_TIMEOUT_MS = 3000;
@@ -44,6 +45,12 @@ export async function ensureDaemon(
   child.on("error", (err) => {
     spawnError = err;
   });
+  // An exit with code 0 means the child lost the race to another daemon: keep trying to connect.
+  // Any other exit before a connect succeeds is a failed start.
+  let failedExit: string | undefined;
+  child.on("exit", (code, signal) => {
+    if (code !== 0) failedExit = code === null ? `signal ${signal}` : `code ${code}`;
+  });
   child.unref();
 
   const deadline = Date.now() + timeoutMs;
@@ -55,6 +62,12 @@ export async function ensureDaemon(
       return await connect(endpoint, { timeoutMs: Math.max(1, deadline - Date.now()) });
     } catch (err) {
       last = err;
+    }
+    // Checked after the connect attempt: another instance may have come up while this one failed.
+    if (failedExit) {
+      throw new Error(
+        `vaultd exited with ${failedExit} before it started; if a stale lock is the cause, delete ${lockPath(paths.runtimeDir)}`,
+      );
     }
   }
   if (last instanceof DaemonIdentityError) throw last;

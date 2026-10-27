@@ -55,11 +55,13 @@ function readTcpEndpoint(file: string, tokenFile: string): { port: number; token
 export function openChannel(endpoint: IpcEndpoint, timeoutMs: number): Promise<Channel> {
   return new Promise<Channel>((resolve, reject) => {
     let token: Buffer | null = null;
+    let dialed = 0;
     let socket: net.Socket;
     if (endpoint.kind === "tcp") {
       let port: number;
       try {
         ({ port, token } = readTcpEndpoint(endpoint.endpointFile, endpoint.tokenFile));
+        dialed = port;
       } catch (err) {
         reject(err);
         return;
@@ -128,12 +130,12 @@ export function openChannel(endpoint: IpcEndpoint, timeoutMs: number): Promise<C
       if (
         serverMac === undefined ||
         nonceS === undefined ||
-        !macMatches(serverMac, handshakeMac(token, "srv", nonceC, nonceS))
+        !macMatches(serverMac, handshakeMac(token, "srv", dialed, nonceC, nonceS))
       ) {
         fail(new DaemonIdentityError());
         return;
       }
-      socket.write(`${handshakeMac(token, "cli", nonceS, nonceC)}\n`);
+      socket.write(`${handshakeMac(token, "cli", dialed, nonceS, nonceC)}\n`);
       succeed();
     };
     const onError = (err: Error) => fail(err);

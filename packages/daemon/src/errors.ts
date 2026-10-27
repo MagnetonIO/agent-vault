@@ -1,7 +1,14 @@
-/** Another vaultd already answers on this endpoint. */
+/**
+ * Another vaultd already answers on this endpoint, or holds the single-instance lock. With a
+ * `lockFile` the message names it, so a user whose lock is stale can delete it.
+ */
 export class DaemonAlreadyRunningError extends Error {
-  constructor() {
-    super("vaultd is already running");
+  constructor(lockFile?: string) {
+    super(
+      lockFile === undefined
+        ? "vaultd is already running"
+        : `vaultd is already running (lock held: ${lockFile}; if no daemon is running, delete that file)`,
+    );
     this.name = "DaemonAlreadyRunningError";
   }
 }

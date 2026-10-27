@@ -134,7 +134,7 @@ export function grant(v: Vault, bundle: string, g: { env: string; secret: string
 export function allowExe(v: Vault, bundle: string, absPath: string): void {
   vaultInternals(v);
   if (typeof absPath !== "string" || !path.isAbsolute(absPath)) {
-    throw new InvalidExePathError(String(absPath));
+    throw new InvalidExePathError();
   }
   mutate(v, bundle, (db, row) => {
     db.prepare("INSERT OR IGNORE INTO bundle_exes (bundle_id, exe_path) VALUES (?, ?)").run(

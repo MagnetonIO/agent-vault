@@ -3,12 +3,36 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { MemoryKeyStore } from "@agent-vault/platform";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { connect } from "../src/client.js";
 import { DaemonAlreadyRunningError } from "../src/errors.js";
+import type { Registry } from "../src/methods/index.js";
+import { registry } from "../src/methods/index.js";
 import { MAX_LINE_BYTES } from "../src/rpc.js";
 import { startDaemon } from "../src/server.js";
 import { endpointFor, MODES, RawPeer, useDaemon, useTmp } from "./helpers.js";
+
+const bigCalls = { count: 0 };
+const hangCalls = { count: 0 };
+const pressureMethods: Registry = {
+  ...registry,
+  "test.big": {
+    mutates: false,
+    returnsSecret: false,
+    handler: () => {
+      bigCalls.count++;
+      return "x".repeat(20 * 1024);
+    },
+  },
+  "test.hang": {
+    mutates: false,
+    returnsSecret: false,
+    handler: () => {
+      hangCalls.count++;
+      return new Promise(() => {});
+    },
+  },
+};
 
 const posix = process.platform === "win32" ? describe.skip : describe;
 
@@ -103,20 +127,12 @@ describe.each(MODES)("transport over %s", (mode) => {
     expect(await env.client.call("status")).toBeTruthy();
   });
 
-  test("the 65th connection is closed, and a slot frees up when one leaves", async () => {
+  test("the 65th authenticated connection is closed, and a slot frees up when one leaves", async () => {
     const open: RawPeer[] = [];
-    const connectRaw = () =>
-      env.endpoint.kind === "unix"
-        ? RawPeer.plain(env.endpoint.path)
-        : RawPeer.plain(
-            (JSON.parse(fs.readFileSync(env.endpoint.endpointFile, "utf8")) as { port: number })
-              .port,
-          );
     try {
       // env.client is one of them; 63 more fill the daemon.
-      for (let i = 0; i < 63; i++) open.push(await connectRaw());
-      await new Promise((r) => setTimeout(r, 200));
-      const extra = await connectRaw();
+      for (let i = 0; i < 63; i++) open.push(await RawPeer.open(env.endpoint));
+      const extra = await RawPeer.open(env.endpoint);
       open.push(extra);
       expect(await extra.waitClosed(1000)).toBe(true);
       // A counted one is still open.
@@ -124,12 +140,101 @@ describe.each(MODES)("transport over %s", (mode) => {
 
       open[0]?.destroy();
       await new Promise((r) => setTimeout(r, 200));
-      const next = await connectRaw();
+      const next = await RawPeer.open(env.endpoint);
       open.push(next);
       await new Promise((r) => setTimeout(r, 200));
       expect(next.closed).toBe(false);
     } finally {
       for (const p of open) p.destroy();
+    }
+  });
+
+  describe("backpressure", () => {
+    const hold = useDaemon(mode, { init: true, methods: pressureMethods });
+
+    test("2000 pipelined requests from a client that never reads stay bounded", async () => {
+      const peer = await RawPeer.open(hold.endpoint);
+      try {
+        peer.socket.pause(); // never reads a byte of the 2000 x 20 KB of answers
+        const before = process.memoryUsage().rss;
+        const line = (id: number) => `{"jsonrpc":"2.0","id":${id},"method":"test.big"}\n`;
+        let batch = "";
+        for (let i = 1; i <= 2000; i++) batch += line(i);
+        peer.send(batch);
+        await new Promise((r) => setTimeout(r, 1000));
+        const grown = process.memoryUsage().rss - before;
+        expect(grown).toBeLessThan(10 * 1024 * 1024);
+        expect(bigCalls.count).toBeLessThan(2000);
+        // Other clients are served meanwhile.
+        const other = await hold.connect();
+        expect(await other.call("secret.list")).toEqual([]);
+      } finally {
+        peer.destroy();
+      }
+    });
+
+    test("at most 64 requests are in flight on one connection", async () => {
+      hangCalls.count = 0;
+      const peer = await RawPeer.open(hold.endpoint);
+      try {
+        let batch = "";
+        for (let i = 1; i <= 200; i++) {
+          batch += `{"jsonrpc":"2.0","id":${i},"method":"test.hang"}\n`;
+        }
+        peer.send(batch);
+        await new Promise((r) => setTimeout(r, 300));
+        expect(hangCalls.count).toBe(64);
+      } finally {
+        peer.destroy();
+      }
+    });
+  });
+});
+
+describe("tcp connection caps", () => {
+  const env = useDaemon("tcp", { init: true });
+  const port = () =>
+    (
+      JSON.parse(
+        fs.readFileSync((env.endpoint as { endpointFile: string }).endpointFile, "utf8"),
+      ) as {
+        port: number;
+      }
+    ).port;
+
+  test("15 silent connections do not stop a real client; the 17th is closed", async () => {
+    const silent: RawPeer[] = [];
+    try {
+      for (let i = 0; i < 15; i++) silent.push(await RawPeer.plain(port()));
+      const real = await env.connect();
+      expect(await real.call("secret.list")).toEqual([]);
+
+      // 15 silent are pending (the real client is authenticated): a 16th fills the cap, a 17th is refused.
+      silent.push(await RawPeer.plain(port()));
+      const over = await RawPeer.plain(port());
+      silent.push(over);
+      expect(await over.waitClosed(1000)).toBe(true);
+      expect(silent[0]?.closed).toBe(false);
+    } finally {
+      for (const p of silent) p.destroy();
+    }
+    // Once the silent ones are cut off (1.5 s step timer), connections are accepted again.
+    await new Promise((r) => setTimeout(r, 1700));
+    const again = await env.connect();
+    expect(await again.call("secret.list")).toEqual([]);
+  });
+
+  test("silent connections do not use up authenticated slots, nor the reverse", async () => {
+    const authed: RawPeer[] = [];
+    const silent: RawPeer[] = [];
+    try {
+      for (let i = 0; i < 63; i++) authed.push(await RawPeer.open(env.endpoint)); // + env.client = 64
+      for (let i = 0; i < 16; i++) silent.push(await RawPeer.plain(port()));
+      await new Promise((r) => setTimeout(r, 200));
+      expect(silent.every((p) => !p.closed)).toBe(true);
+      expect(authed.every((p) => !p.closed)).toBe(true);
+    } finally {
+      for (const p of [...authed, ...silent]) p.destroy();
     }
   });
 });
@@ -158,6 +263,24 @@ describe("tcp endpoint files", () => {
       }
     }
     expect(tokens[0]).not.toBe(tokens[1]);
+  });
+
+  test("the port is published before the token", async () => {
+    const endpoint = endpointFor("tcp", tmp.paths);
+    if (endpoint.kind !== "tcp") throw new Error("unreachable");
+    const order: string[] = [];
+    const realRename = fs.renameSync;
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      order.push(path.basename(String(to)));
+      realRename(from, to);
+    });
+    try {
+      const d = await startDaemon({ paths: tmp.paths, store: new MemoryKeyStore(), endpoint });
+      await d.close();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(order).toEqual(["endpoint.json", "token"]);
   });
 
   test("a stale endpoint file from a dead daemon is replaced", async () => {

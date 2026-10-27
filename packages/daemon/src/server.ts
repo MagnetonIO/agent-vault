@@ -25,7 +25,12 @@ import { acquireLock } from "./lock.js";
 import { type DaemonState, registry as defaultRegistry, type Registry } from "./methods/index.js";
 import { ERR, encodeLine, LineSplitter, MAX_LINE_BYTES, parseRequestLine } from "./rpc.js";
 
+/** Authenticated connections (on unix, where there is no handshake, all connections). */
 export const MAX_CONNECTIONS = 64;
+/** tcp connections that have not finished the handshake yet. */
+export const MAX_PENDING_CONNECTIONS = 16;
+/** Requests being handled at once on one connection; reading pauses beyond this. */
+export const MAX_IN_FLIGHT = 64;
 const PROBE_TIMEOUT_MS = 500;
 /** How long a connection we are closing may keep sending before it is cut off. */
 const CLOSE_GRACE_MS = 1000;
@@ -116,8 +121,8 @@ async function listenUnix(server: net.Server, socketPath: string): Promise<() =>
 }
 
 /**
- * tcp: listen on loopback, then publish a fresh token and the port, each through temp + rename in
- * the private runtime dir. The token is written first so a client that finds the port finds it.
+ * tcp: listen on loopback, then publish the port and a fresh token, each through temp + rename in
+ * the private runtime dir.
  */
 async function listenTcp(
   server: net.Server,
@@ -139,8 +144,9 @@ async function listenTcp(
   };
   try {
     const { port } = server.address() as net.AddressInfo;
-    writeAtomic(endpoint.tokenFile, token.toString("hex"));
+    // The port first and the token last, so a client never pairs a new token with a stale port.
     writeAtomic(endpoint.endpointFile, JSON.stringify({ port, pid: process.pid }));
+    writeAtomic(endpoint.tokenFile, token.toString("hex"));
   } catch (err) {
     remove();
     throw err;
@@ -148,20 +154,67 @@ async function listenTcp(
   return remove;
 }
 
+/** Connection counts: unauthenticated tcp connections are capped apart from authenticated ones. */
+class Limits {
+  #pending = 0;
+  #authed = 0;
+  readonly #handshake: boolean;
+
+  constructor(handshake: boolean) {
+    this.#handshake = handshake;
+  }
+
+  /** Count a new connection. False if it is over the cap. */
+  admit(): boolean {
+    if (this.#handshake) {
+      if (this.#pending >= MAX_PENDING_CONNECTIONS) return false;
+      this.#pending++;
+    } else {
+      if (this.#authed >= MAX_CONNECTIONS) return false;
+      this.#authed++;
+    }
+    return true;
+  }
+
+  /** A tcp connection passed the handshake. False if the authenticated cap is full (it stays pending). */
+  promote(): boolean {
+    if (this.#authed >= MAX_CONNECTIONS) return false;
+    this.#pending--;
+    this.#authed++;
+    return true;
+  }
+
+  /** The connection is gone; `counted` says which count it was in. */
+  release(counted: "pending" | "authed"): void {
+    if (counted === "authed") this.#authed--;
+    else this.#pending--;
+  }
+}
+
 type Conn = {
   socket: net.Socket;
   token: Buffer | null;
   dispatch: Dispatcher;
+  limits: Limits;
 };
 
 /** One accepted connection: the handshake (tcp only), then newline-delimited JSON-RPC. */
-function serveConnection({ socket, token, dispatch }: Conn): void {
+function serveConnection({ socket, token, dispatch, limits }: Conn): void {
   type Phase = "nonce" | "mac" | "rpc" | "closing";
   let phase: Phase = token ? "nonce" : "rpc";
   let nonceC = "";
   let nonceS = "";
+  let inFlight = 0;
   const splitter = new LineSplitter(token ? HANDSHAKE_LINE_MAX : MAX_LINE_BYTES);
   let timer: NodeJS.Timeout | undefined;
+
+  if (!limits.admit()) {
+    socket.destroy();
+    return;
+  }
+  // Where this connection is counted: pending until the handshake passes (unix: never pending).
+  let counted: "pending" | "authed" = token === null ? "authed" : "pending";
+  socket.once("close", () => limits.release(counted));
 
   const armStepTimer = () => {
     clearTimeout(timer);
@@ -184,6 +237,9 @@ function serveConnection({ socket, token, dispatch }: Conn): void {
     timer = setTimeout(() => socket.destroy(), CLOSE_GRACE_MS);
   };
 
+  /** Stop reading while the peer is not reading our answers or too many requests are open. */
+  const blocked = () => socket.writableNeedDrain || inFlight >= MAX_IN_FLIGHT;
+
   const handleRpcLine = async (line: Buffer) => {
     const req = parseRequestLine(line.toString("utf8"));
     if (req.kind === "ignore") return;
@@ -191,25 +247,31 @@ function serveConnection({ socket, token, dispatch }: Conn): void {
       send({ jsonrpc: "2.0", id: req.id, error: req.error });
       return;
     }
-    const outcome = await dispatch(req.method, req.params, notify);
+    inFlight++;
     try {
-      send(
-        outcome.ok
-          ? { jsonrpc: "2.0", id: req.id, result: outcome.result ?? null }
-          : { jsonrpc: "2.0", id: req.id, error: outcome.error },
-      );
-    } catch {
-      // A result that cannot be serialized (a handler bug) must not crash the daemon.
-      send({
-        jsonrpc: "2.0",
-        id: req.id,
-        error: { code: ERR.INTERNAL, message: "internal error" },
-      });
+      const outcome = await dispatch(req.method, req.params, notify);
+      try {
+        send(
+          outcome.ok
+            ? { jsonrpc: "2.0", id: req.id, result: outcome.result ?? null }
+            : { jsonrpc: "2.0", id: req.id, error: outcome.error },
+        );
+      } catch {
+        // A result that cannot be serialized (a handler bug) must not crash the daemon.
+        send({
+          jsonrpc: "2.0",
+          id: req.id,
+          error: { code: ERR.INTERNAL, message: "internal error" },
+        });
+      }
+    } finally {
+      inFlight--;
+      pump();
     }
   };
 
   const drain = () => {
-    while (phase !== "closing") {
+    while (phase !== "closing" && !blocked()) {
       let line: Buffer | null;
       try {
         line = splitter.next();
@@ -230,15 +292,22 @@ function serveConnection({ socket, token, dispatch }: Conn): void {
           return;
         }
         nonceS = newNonce();
-        socket.write(`${handshakeMac(token, "srv", nonceC, nonceS)} ${nonceS}\n`);
+        socket.write(
+          `${handshakeMac(token, "srv", socket.localPort ?? 0, nonceC, nonceS)} ${nonceS}\n`,
+        );
         phase = "mac";
         armStepTimer();
       } else if (phase === "mac" && token) {
-        const expected = handshakeMac(token, "cli", nonceS, nonceC);
+        const expected = handshakeMac(token, "cli", socket.localPort ?? 0, nonceS, nonceC);
         if (!macMatches(line.toString("latin1"), expected)) {
           socket.destroy();
           return;
         }
+        if (!limits.promote()) {
+          socket.destroy(); // authenticated, but the daemon is full
+          return;
+        }
+        counted = "authed";
         phase = "rpc";
         clearTimeout(timer);
         splitter.max = MAX_LINE_BYTES;
@@ -248,10 +317,23 @@ function serveConnection({ socket, token, dispatch }: Conn): void {
     }
   };
 
+  /** Read again if nothing holds us back, and work through what is already buffered. */
+  const pump = () => {
+    if (phase === "closing" || socket.destroyed) return;
+    if (blocked()) {
+      socket.pause();
+      return;
+    }
+    socket.resume();
+    drain();
+    if (blocked()) socket.pause();
+  };
+
+  socket.on("drain", pump);
   socket.on("data", (chunk: Buffer) => {
     if (phase === "closing") return;
     splitter.push(chunk);
-    drain();
+    pump();
   });
 }
 
@@ -283,12 +365,12 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
       paths,
       store,
     });
+    const limits = new Limits(token !== null);
     server = net.createServer((socket) => {
       sockets.add(socket);
       socket.once("close", () => sockets.delete(socket));
-      serveConnection({ socket, token, dispatch });
+      serveConnection({ socket, token, dispatch, limits });
     });
-    server.maxConnections = MAX_CONNECTIONS;
     removeEndpoint =
       endpoint.kind === "unix"
         ? await listenUnix(server, endpoint.path)

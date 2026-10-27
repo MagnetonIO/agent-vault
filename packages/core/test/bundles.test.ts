@@ -111,6 +111,14 @@ describe("bundles", () => {
     for (const bad of ["", "git", "./git", "bin/git", "~/bin/git"]) {
       expect(() => allowExe(v, "b", bad)).toThrow(InvalidExePathError);
     }
+    // The message never repeats what was passed in.
+    const leaky = "hunter2-not-a-path";
+    expect(() => allowExe(v, "b", leaky)).toThrow("exe path must be absolute");
+    try {
+      allowExe(v, "b", leaky);
+    } catch (err) {
+      expect((err as Error).message).not.toContain(leaky);
+    }
     expect(resolveBundle(v, "b").exes).toEqual([]);
   });
 

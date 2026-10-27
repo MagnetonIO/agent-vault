@@ -5,6 +5,7 @@ import { MemoryKeyStore } from "@agent-vault/platform";
 import { describe, expect, test } from "vitest";
 import { connect } from "../src/client.js";
 import { DaemonAlreadyRunningError } from "../src/errors.js";
+import { readBootId, sameBoot } from "../src/lock.js";
 import { startDaemon } from "../src/server.js";
 import { useTmp } from "./helpers.js";
 
@@ -16,10 +17,33 @@ function deadPid(): number {
   return Number(r.stdout);
 }
 
+type LockContent = { pid: number; bootId: string; startedAt: string };
+
+describe("boot id", () => {
+  test("the reader works on this OS and is stable within a boot", () => {
+    const id = readBootId();
+    expect(id).not.toBe("");
+    if (process.platform === "win32") expect(id).toMatch(/^win:\d+$/);
+    else expect(id).toMatch(/^[0-9a-f-]{16,}$/i);
+    expect(sameBoot(id, readBootId())).toBe(true);
+  });
+
+  test("sameBoot: equal ids match, different ones do not, unknown never differs", () => {
+    expect(sameBoot("a", "a")).toBe(true);
+    expect(sameBoot("a", "b")).toBe(false);
+    expect(sameBoot("", "b")).toBe(true);
+    expect(sameBoot("win:1000000", "win:1050000")).toBe(true);
+    expect(sameBoot("win:1000000", "win:1100000")).toBe(false);
+  });
+});
+
 describe("single-instance lock", () => {
   const tmp = useTmp();
   const lockFile = () => path.join(tmp.paths.runtimeDir, "vaultd.lock");
   const start = () => startDaemon({ paths: tmp.paths, store: new MemoryKeyStore() });
+  const readLock = () => JSON.parse(fs.readFileSync(lockFile(), "utf8")) as LockContent;
+  const writeInfo = (pid: number, bootId: string) =>
+    writeLock(JSON.stringify({ pid, bootId, startedAt: new Date().toISOString() }));
   const writeLock = (text: string) => {
     fs.mkdirSync(tmp.paths.runtimeDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(lockFile(), text);
@@ -43,7 +67,7 @@ describe("single-instance lock", () => {
               .readdirSync(path.dirname(endpoint.endpointFile))
               .filter((f) => f === "endpoint.json");
       expect(files).toHaveLength(1);
-      expect(fs.readFileSync(lockFile(), "utf8")).toBe(String(process.pid));
+      expect(readLock().pid).toBe(process.pid);
 
       const c = await connect(endpoint);
       expect(await c.call("status")).toMatchObject({ initialized: false });
@@ -64,19 +88,44 @@ describe("single-instance lock", () => {
   });
 
   test("a stale lock holding a dead pid is recovered", async () => {
-    writeLock(String(deadPid()));
+    writeInfo(deadPid(), readBootId());
     const d = await start();
     try {
-      expect(fs.readFileSync(lockFile(), "utf8")).toBe(String(process.pid));
+      expect(readLock()).toMatchObject({ pid: process.pid, bootId: readBootId() });
     } finally {
       await d.close();
     }
   });
 
-  test("a lock held by a live process is respected", async () => {
+  test("a live pid from this boot is never reaped, and the error names the lock file", async () => {
+    writeInfo(process.ppid, readBootId());
+    const before = fs.readFileSync(lockFile(), "utf8");
+    const err = await start().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(DaemonAlreadyRunningError);
+    expect((err as Error).message).toContain("vaultd.lock");
+    expect(fs.readFileSync(lockFile(), "utf8")).toBe(before);
+  });
+
+  test("a live pid with a different boot id (pid reused after a reboot) is reaped", async () => {
+    const other =
+      process.platform === "win32" ? "win:1000" : "00000000-dead-beef-0000-000000000000";
+    writeInfo(process.ppid, other);
+    const d = await start();
+    try {
+      expect(readLock()).toMatchObject({ pid: process.pid, bootId: readBootId() });
+    } finally {
+      await d.close();
+    }
+  });
+
+  test("a legacy bare-pid lock keeps the old rules", async () => {
     writeLock(String(process.ppid));
     await expect(start()).rejects.toBeInstanceOf(DaemonAlreadyRunningError);
-    expect(fs.readFileSync(lockFile(), "utf8")).toBe(String(process.ppid));
+    writeLock(String(deadPid()));
+    await (await start()).close();
   });
 
   test("an empty lock is respected while young and recovered once older than 5 s", async () => {

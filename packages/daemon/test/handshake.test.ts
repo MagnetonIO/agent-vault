@@ -78,9 +78,9 @@ describe("tcp handshake", () => {
         peer.send(`${nonceC}\n`);
         const reply = (await peer.line()) as string;
         const [mac, nonceS] = reply.split(" ") as [string, string];
-        expect(mac).toBe(handshakeMac(token, "srv", nonceC, nonceS));
+        expect(mac).toBe(handshakeMac(token, "srv", readPort(env), nonceC, nonceS));
 
-        peer.send(`${handshakeMac(token, "cli", nonceS, nonceC)}\n`);
+        peer.send(`${handshakeMac(token, "cli", readPort(env), nonceS, nonceC)}\n`);
         expect((await peer.rpc("status")).result).toMatchObject({ initialized: true });
       } finally {
         peer.destroy();
@@ -93,7 +93,7 @@ describe("tcp handshake", () => {
       const nonceC = newNonce();
       peer.send(`${nonceC}\n`);
       const nonceS = ((await peer.line()) as string).split(" ")[1] as string;
-      const spikeMac = handshakeMac(token, "cli", nonceS, "");
+      const spikeMac = handshakeMac(token, "cli", readPort(env), nonceS, "");
       peer.send(`${spikeMac}\n{"jsonrpc":"2.0","id":1,"method":"status"}\n`);
       expect(await peer.line(1000)).toBeNull();
       expect(await peer.waitClosed()).toBe(true);
@@ -107,7 +107,7 @@ describe("tcp handshake", () => {
       const reply = (await peer.line()) as string;
       const nonceS = reply.split(" ")[1] as string;
       peer.send(
-        `${handshakeMac(wrong, "cli", nonceS, nonceC)}\n{"jsonrpc":"2.0","id":1,"method":"status"}\n`,
+        `${handshakeMac(wrong, "cli", readPort(env), nonceS, nonceC)}\n{"jsonrpc":"2.0","id":1,"method":"status"}\n`,
       );
       expect(await peer.line(1000)).toBeNull();
       expect(await peer.waitClosed()).toBe(true);
@@ -152,6 +152,32 @@ describe("tcp handshake", () => {
       expect(await peer.waitClosed(3000)).toBe(true);
     });
 
+    test("a relay on another port that pipes to the real daemon fails the handshake", async () => {
+      const token = readToken(env);
+      const relay = await new Listener((client) => {
+        const upstream = net.connect(readPort(env), "127.0.0.1");
+        upstream.on("error", () => client.destroy());
+        upstream.on("data", (d) => client.write(d));
+        client.on("data", (d: Buffer) => upstream.write(d));
+        client.on("close", () => upstream.destroy());
+      }).listen();
+      try {
+        expect(relay.port).not.toBe(readPort(env));
+        // The relay is given the REAL token, so only the port binding can stop it.
+        const endpoint = pointAt(tmp.dir, relay.port, token);
+        await expect(connect(endpoint)).rejects.toBeInstanceOf(DaemonIdentityError);
+        await new Promise((r) => setTimeout(r, 100));
+        expect(relay.bytes).toMatch(NONCE_LINE);
+        expect(relay.bytes).toHaveLength(65);
+        // The daemon is unharmed and serves a direct client.
+        const direct = await connect(env.endpoint);
+        expect(await direct.call("secret.list")).toEqual([]);
+        direct.close();
+      } finally {
+        relay.close();
+      }
+    });
+
     test("the client sends only the nonce when the token is wrong", async () => {
       // A recording proxy in front of the real daemon, with a token file that does not match.
       const proxy = await new Listener((client) => {
@@ -177,20 +203,27 @@ describe("tcp handshake", () => {
     const tmp = useTmp();
     const token = randomBytes(32);
 
-    const impostors: [string, (socket: net.Socket, nonceC: string) => void][] = [
+    const impostors: [string, (socket: net.Socket, nonceC: string, port: number) => void][] = [
       ["answers with a bogus MAC", (s) => s.write(`${"f".repeat(64)} ${newNonce()}\n`)],
       [
         "knows a different token",
-        (s, nonceC) => {
+        (s, nonceC, port) => {
           const nonceS = newNonce();
-          s.write(`${handshakeMac(randomBytes(32), "srv", nonceC, nonceS)} ${nonceS}\n`);
+          s.write(`${handshakeMac(randomBytes(32), "srv", port, nonceC, nonceS)} ${nonceS}\n`);
         },
       ],
       [
         "MACs only the client nonce (no channel binding)",
-        (s, nonceC) => {
+        (s, nonceC, port) => {
           const nonceS = newNonce();
-          s.write(`${handshakeMac(token, "srv", nonceC, "")} ${nonceS}\n`);
+          s.write(`${handshakeMac(token, "srv", port, nonceC, "")} ${nonceS}\n`);
+        },
+      ],
+      [
+        "knows the token but MACs another port",
+        (s, nonceC, port) => {
+          const nonceS = newNonce();
+          s.write(`${handshakeMac(token, "srv", port + 1, nonceC, nonceS)} ${nonceS}\n`);
         },
       ],
       ["replies with something that is not a handshake line", (s) => s.write("ok\n")],
@@ -204,7 +237,7 @@ describe("tcp handshake", () => {
           socket.on("data", () => {
             const first = listener.bytes.split("\n")[0] as string;
             if (listener.received.length === 1 && /^[0-9a-f]{64}$/.test(first))
-              reply(socket, first);
+              reply(socket, first, impostor.port);
           });
         }).listen();
         try {
