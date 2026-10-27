@@ -1,10 +1,11 @@
 name: ci
 
-# Actions minutes are limited (macOS bills 10x, Windows 2x). A push runs Linux only; the full
-# 3-OS matrix runs on demand (`gh workflow run ci.yml -f full=true`) and on pull requests.
+# Actions minutes are limited (macOS bills 10x, Windows 2x). Only main is pushed (dev -> main);
+# that runs Linux only. The full 3-OS matrix runs on pull requests and on demand
+# (`gh workflow run ci.yml -f full=true`).
 on:
   push:
-    branches: [main, "feat/**"]
+    branches: [main]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
