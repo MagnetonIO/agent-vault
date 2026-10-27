@@ -2,7 +2,7 @@
 
 Status: **done**. Code and evidence: `spikes/s3-hooks/` (throwaway). Measured 2026-10-26 on macOS with Claude Code 2.1.311, Codex CLI 0.164.0, OpenCode 2.1.4.
 
-Everything ran against sandboxed config dirs (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_*`) with the fake secret `AVCANARY_<uuid4>`. Model calls went to local mock endpoints, with **one exception**: one fake canary reached `api.openai.com` (HTTP 401) because Codex silently skips untrusted hooks (decision 2, disclosure at the end). Three items touched or may have touched real dirs; see "Commands run outside the sandbox". Methods and limits are at the end.
+Everything ran against sandboxed config dirs (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_*`) with the fake secret `AVCANARY_<uuid4>`. Model calls went to local mock endpoints, with **one exception**: one fake canary reached `api.openai.com` (HTTP 401) because Codex silently skips untrusted hooks (decision 2, disclosure at the end). Six items touched or may have touched real dirs; see "Commands run outside the sandbox". Methods and limits are at the end.
 
 **Evidence convention.** `[E: file]` = raw log committed under `spikes/s3-hooks/evidence/`. `[not retained]` = observed once, log not retained. Files marked *summary* there (`canary-files.txt`, `scrub-resume.txt`, `env-probe.txt`) are hand-written notes, not raw logs.
 
@@ -213,7 +213,7 @@ See the updated adapter table in `docs/design.md`. Items for the plan owner (the
 
 ## Commands run outside the sandbox
 
-Exactly five items: 3 `opencode` invocations (each wrote one line to the real `opencode.log`) and 2 unattributed file changes. No secret was written to a real dir as far as can be told (items 4 and 5 are unattributed); they are listed so the real-dir check can be read honestly. Apart from item 3 (a single `opencode --version`, the `opencode` calls in items 1 and 2 predate this round), fix round 1 ran every harness command sandboxed (`env -i`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_*` in one temp dir, under `timeout`).
+Six items below: 3 `opencode` invocations (1 log line each), 1 `claude --version` pattern (4 runs), and 2 unattributed file changes. No secret was written to a real dir as far as can be told (items 5 and 6 are unattributed); they are listed so the real-dir check can be read honestly. Apart from items 3 and 4, fix round 1 ran every harness command sandboxed (`env -i`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_*` in one temp dir, under `timeout`); the `opencode` calls in items 1 and 2 predate this round.
 
 Real `~/.local/share/opencode/log/opencode.log` holds 3 "cli starting" lines from this work, 1 log line each, harmless:
 
@@ -223,9 +223,13 @@ Real `~/.local/share/opencode/log/opencode.log` holds 3 "cli starting" lines fro
 | 2 | 03:03:57Z | `mcp add --help` | spike implementer |
 | 3 | 15:08:41Z | `--version` | fix round 1, run without the sandbox env |
 
+Fix round 1 also ran `claude --version` with the **real** `HOME` at least 4 times (once per `run-sessionend-scrub.sh` mode, 3 runs, plus once in `run-apikeyhelper.sh`), in the driver scripts' header echo:
+
+4. `claude --version`, ≥4 runs, fix round 1. Effect on the real `~/.claude*` is **unverified** (probably a fast path that touches nothing). The scripts now run it through the same `timeout 30 env -i` sandbox wrapper.
+
 Unattributed changes (no spike command known to cause them):
 
-4. Real `~/.codex/state_5.sqlite` mtime 02:56Z falls in the spike window. Cause unattributed (a `codex app-server` daemon was running).
-5. `~/.claude.json` and `~/.codex/config.toml` changed during the window. Attributed to live sessions, unproven.
+5. Real `~/.codex/state_5.sqlite` mtime 02:56Z falls in the spike window. Cause unattributed (a `codex app-server` daemon was running).
+6. `~/.claude.json` and `~/.codex/config.toml` changed during the window. Attributed to live sessions, unproven.
 
 Stat-only before/after check, paths sanitized to `~`: [E: real-dirs-check.txt]. `~/.claude/settings.json` and `~/.codex/history.jsonl` are unchanged (mtime and size equal).

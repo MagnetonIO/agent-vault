@@ -39,7 +39,7 @@ lines() { # summarize transcript lines that hold the canary: type/subtype/top-le
     }
     console.log(`  lines=${n} invalid_json_lines=${bad}`);' "$1" "$CANARY"
 }
-echo "# mode=$MODE claude=$(claude --version 2>/dev/null | head -1)"
+echo "# mode=$MODE claude=$(timeout 30 env -i "${SBENV[@]}" claude --version 2>/dev/null | head -1)"
 timeout 120 env -i "${SBENV[@]}" claude -p "please store $CANARY thanks" --output-format json < /dev/null > "$SB/out1.json" 2> "$SB/err1"
 echo "run1 exit=$? result=$(node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(JSON.stringify({is_error:j.is_error,num_turns:j.num_turns,duration_api_ms:j.duration_api_ms,result:String(j.result).slice(0,120)}))' "$SB/out1.json")"
 SID=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).session_id)' "$SB/out1.json")

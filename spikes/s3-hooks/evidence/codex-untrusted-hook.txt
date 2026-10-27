@@ -1,5 +1,5 @@
 # Raw output: spikes/s3-hooks/run-codex-trust.sh, run 2026-10-27. Codex 0.164.0, hooks.json present but NEVER trusted (no [hooks.state] entry).
-# Model endpoint is the local mock-400.mjs (provider base_url 127.0.0.1); nothing was sent to api.openai.com in this run.
+# Model endpoint is the local mock-400.mjs (provider base_url 127.0.0.1); nothing was sent to api.openai.com in this mock repro. (The ORIGINAL live run, log not retained, did reach api.openai.com: HTTP 401.)
 # Result: hook ran 0 times, the prompt (with the fake canary) reached the model endpoint, no hook/trust warning on stdout/stderr. That is the fail-open.
 
 # codex=codex-cli 0.164.0

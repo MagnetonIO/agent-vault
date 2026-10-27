@@ -26,6 +26,9 @@ run() { # $1 = helper|control
   echo "mock log:"; sed 's/^/  /' "$SB/mock.log"
   kill $MP 2>/dev/null; rm -rf "$SB"
 }
-echo "# claude=$(claude --version | head -1)"
+VSB=$(mktemp -d "${TMPDIR:-/tmp}/av-s3ver.XXXXXX")
+mkdir -p "$VSB"/{home,cfg,codex,xdg/config,xdg/data,xdg/state,xdg/cache}
+echo "# claude=$(timeout 30 env -i HOME="$VSB/home" CLAUDE_CONFIG_DIR="$VSB/cfg" CODEX_HOME="$VSB/codex" XDG_CONFIG_HOME="$VSB/xdg/config" XDG_DATA_HOME="$VSB/xdg/data" XDG_STATE_HOME="$VSB/xdg/state" XDG_CACHE_HOME="$VSB/xdg/cache" PATH="$(dirname "$(command -v claude)"):/usr/bin:/bin" claude --version 2>&1 | head -1)"
+rm -rf "$VSB"
 run helper 2>&1 | grep -v Terminated
 run control 2>&1 | grep -v Terminated
