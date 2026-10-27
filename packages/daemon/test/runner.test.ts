@@ -1,11 +1,16 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import type { AuditEvent } from "@agent-vault/core";
-import { describe, expect, test, vi } from "vitest";
+import { type AuditEvent, allowExe, createBundle, initVault } from "@agent-vault/core";
+import { getPaths, MemoryKeyStore } from "@agent-vault/platform";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { connect, type IpcClient } from "../src/client.js";
+import { Connection } from "../src/connection.js";
 import { RpcError } from "../src/errors.js";
 import { type Registry, registry } from "../src/methods/index.js";
+import { createRunnerService, prepareRun } from "../src/runner.js";
 import { b64, MODES, RawPeer, type Reply, useDaemon } from "./helpers.js";
 
 // Every test here starts real processes; a Windows runner needs far longer than the 5 s default.
@@ -71,6 +76,27 @@ async function rpcError(p: Promise<unknown>): Promise<RpcError> {
   }
   throw new Error("expected an RpcError");
 }
+
+/** Pids of processes the tests started, killed after each test even if an assertion failed. */
+const started = new Set<number>();
+const track = (...pids: number[]): number[] => {
+  for (const pid of pids) started.add(pid);
+  return pids;
+};
+afterEach(() => {
+  for (const pid of started) {
+    for (const target of WIN_OR_GROUP(pid)) {
+      try {
+        process.kill(target, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  }
+  started.clear();
+});
+/** A leader's pid and, on POSIX, its whole group (`-pid`). */
+const WIN_OR_GROUP = (pid: number): number[] => (POSIX ? [-pid, pid] : [pid]);
 
 function pidGone(pid: number): boolean {
   try {
@@ -172,6 +198,44 @@ describe.each(MODES)("run and helper over %s", (mode) => {
       });
       await run.result;
       expect(run.out.stdout).toBe("a€b\u{1F600}c");
+    });
+
+    test("base64 wrapped at 64 and 76 columns (openssl, GNU base64) is redacted", async () => {
+      const key = `sk-proj-${"Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7".repeat(4)}`;
+      await put("t", key);
+      const run = startRun(env.client, {
+        argv: nodeE(
+          `const b = Buffer.from(process.env.TOKEN).toString("base64");
+for (const [n, sep] of [[64, "\\n"], [76, "\\n"], [76, "\\r\\n"]]) console.log(b.match(new RegExp(".{1," + n + "}", "g")).join(sep));`,
+        ),
+        env: { TOKEN: "vault://t" },
+      });
+      await run.result;
+      expect(run.out.stdout).not.toMatch(/[A-Za-z0-9+/]{20}/);
+      expect(run.out.stdout).toBe("[redacted vault://t]\n".repeat(3));
+    });
+
+    test("the whole environment dumped as JSON is redacted", async () => {
+      const value = 'pa"ss\\word with "quotes" 12345';
+      await put("t", value);
+      const run = startRun(env.client, {
+        argv: nodeE("console.log(JSON.stringify(process.env))"),
+        env: { TOKEN: "vault://t" },
+      });
+      await run.result;
+      expect(run.out.stdout).toContain('"TOKEN":"[redacted vault://t]"');
+      expect(run.out.stdout).not.toContain(JSON.stringify(value).slice(1, -1));
+    });
+
+    test("a prompt is delivered at once, not held back waiting for more output", async () => {
+      await put("t", SECRET);
+      const run = startRun(env.client, {
+        argv: nodeE("process.stdout.write('Password: '); process.stdin.resume()"),
+        env: { TOKEN: "vault://t" },
+      });
+      await run.seen("stdout", "Password: "); // would hang (and time out) if it were held
+      await env.client.call("run.stdin", { runId: run.runId, end: true });
+      await run.result;
     });
 
     test("a secret under 4 characters is an app error and the child never runs", async () => {
@@ -377,7 +441,8 @@ describe.each(MODES)("run and helper over %s", (mode) => {
   });
 
   describe("lifetime", () => {
-    const pidOf = (run: Run) => run.seen("stdout", "\n").then(() => Number(run.out.stdout.trim()));
+    const pidOf = (run: Run) =>
+      run.seen("stdout", "\n").then(() => track(Number(run.out.stdout.trim()))[0] as number);
 
     test("a client that disconnects has its child terminated", async () => {
       const owner = await connect(env.endpoint);
@@ -429,7 +494,7 @@ setInterval(() => {}, 1000);`,
         ignoreSigterm ? "process.on('SIGTERM', () => {});" : "",
       );
     const pidsOf = (run: Run) =>
-      run.seen("stdout", "\n").then(() => run.out.stdout.trim().split(" ").map(Number));
+      run.seen("stdout", "\n").then(() => track(...run.out.stdout.trim().split(" ").map(Number)));
 
     test.runIf(POSIX)("disconnecting kills the whole process group", async () => {
       const owner = await connect(env.endpoint);
@@ -543,6 +608,91 @@ let i = 0;
       },
       60_000,
     );
+  });
+
+  describe("stdin backpressure", () => {
+    test.runIf(mode === MODES[0])(
+      "a child that never reads cannot make the daemon buffer an unbounded stdin",
+      async () => {
+        const MiB = 1024 * 1024;
+        const chunk = b64("x".repeat(512 * 1024)); // 100 of these are 50 MiB
+        // Warm up on a child that does read, so the allocator has already grown for this traffic
+        // and the baseline below does not include one-off costs.
+        const warm = startRun(env.client, { argv: nodeE("process.stdin.resume()") });
+        for (let i = 0; i < 20; i++) {
+          await env.client.call("run.stdin", { runId: warm.runId, dataB64: chunk });
+        }
+        await env.client.call("run.stdin", { runId: warm.runId, end: true });
+        await warm.result;
+
+        const run = startRun(env.client, {
+          argv: nodeE("console.log('up'); setInterval(() => {}, 1000)"),
+        });
+        await run.seen("stdout", "up");
+        const baseline = process.memoryUsage().rss;
+        let sent = 0;
+        const sender = (async () => {
+          for (let i = 0; i < 100; i++) {
+            await env.client.call(
+              "run.stdin",
+              { runId: run.runId, dataB64: chunk },
+              { timeoutMs: 0 },
+            );
+            sent++;
+          }
+        })();
+        sender.catch(() => {});
+        let peak = baseline;
+        for (let i = 0; i < 25; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+          peak = Math.max(peak, process.memoryUsage().rss);
+        }
+        expect(sent).toBeLessThan(10); // stuck behind the full pipe, not 100 chunks in
+        expect(peak - baseline).toBeLessThan(20 * MiB);
+
+        // The connection is not stuck behind the pending write: the run can still be ended.
+        await env.client.call("run.signal", { runId: run.runId, signal: "SIGKILL" });
+        const result = await run.result;
+        expect(result.exitCode).not.toBe(0);
+        await sender.then(
+          () => {},
+          () => {}, // "no such run" once it is gone
+        );
+      },
+      60_000,
+    );
+  });
+
+  describe("env file", () => {
+    const envFileError = async (file: string) =>
+      rpcError(startRun(env.client, { argv: nodeE("0"), cwd: env.dir, envFile: file }).result);
+
+    test.runIf(POSIX)("a FIFO is refused instead of freezing the daemon", async () => {
+      const fifo = path.join(env.dir, "fifo.env");
+      execFileSync("mkfifo", [fifo]);
+      const err = await envFileError(fifo);
+      expect(err.data).toEqual({ name: "RunError" });
+      expect(err.message).toContain("not a regular file");
+      // Still responsive.
+      expect(await env.client.call("secret.list")).toEqual([]);
+    });
+
+    test("a directory is refused", async () => {
+      const err = await envFileError(env.dir);
+      expect(err.data).toEqual({ name: "RunError" });
+    });
+
+    test("a file over 1 MiB is refused", async () => {
+      fs.writeFileSync(path.join(env.dir, "big.env"), `A=${"x".repeat(1024 * 1024)}\n`);
+      const err = await envFileError("big.env");
+      expect(err.data).toEqual({ name: "RunError" });
+      expect(err.message).toContain("larger than");
+    });
+
+    test("a missing file is an app error", async () => {
+      const err = await envFileError("nope.env");
+      expect(err.data).toEqual({ name: "RunError" });
+    });
   });
 
   describe("exe allowlist", () => {
@@ -779,6 +929,54 @@ let i = 0;
   });
 });
 
+describe.runIf(POSIX)("the file that was checked is the file that runs", () => {
+  test("retargeting a symlink after the check changes nothing", async () => {
+    // Its own sandbox: a vault in a temp dir with a throwaway key store.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "avd-"));
+    const { vault } = await initVault({
+      paths: getPaths({ AGENT_VAULT_HOME: dir }, process.platform),
+      store: new MemoryKeyStore(),
+    });
+    try {
+      createBundle(vault, "b");
+      allowExe(vault, "b", NODE);
+      const link = path.join(dir, "node-link");
+      fs.symlinkSync(NODE, link);
+      const runId = randomUUID();
+      const prepared = prepareRun(vault, {
+        runId,
+        argv: [link, "-e", "console.log('real node')"],
+        cwd: dir,
+        baseEnv,
+        bundle: "b",
+        envFile: undefined,
+        refs: undefined,
+      });
+      // What will be spawned is the real file; the name the caller used is kept for argv[0].
+      expect(prepared.command).toBe(fs.realpathSync.native(NODE));
+      expect(prepared.argv0).toBe(link);
+
+      // Between the check and the spawn the link is pointed at a different program.
+      fs.unlinkSync(link);
+      fs.copyFileSync("/bin/sh", link);
+      fs.chmodSync(link, 0o755);
+
+      const out: string[] = [];
+      const result = await createRunnerService().start(
+        runId,
+        new Connection(),
+        prepared,
+        (_method, params) => out.push((params as { data: string }).data),
+      );
+      expect(result).toEqual({ exitCode: 0 });
+      expect(out.join("")).toBe("real node\n");
+    } finally {
+      vault.close();
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+});
+
 describe("IpcClient.call timeout option", () => {
   const methods: Registry = {
     ...registry,
@@ -847,7 +1045,7 @@ describe.runIf(process.platform === "win32")("Windows .cmd shims", () => {
     const owner = await connect(env.endpoint);
     const run = startRun(owner, { argv: [path.join(env.dir, "idle.cmd")], cwd: env.dir });
     await run.seen("stdout", "\n");
-    const pid = Number(run.out.stdout.trim());
+    const pid = track(Number(run.out.stdout.trim()))[0] as number;
     expect(pidGone(pid)).toBe(false);
     owner.close();
     expect(await waitGone(pid, 6000)).toBe(true);

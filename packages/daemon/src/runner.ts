@@ -107,6 +107,39 @@ function realpathOrUndefined(p: string): string | undefined {
 
 type Slot = { secret: string } | { literal: string };
 
+/** Largest env file `run.start` will read. */
+export const ENV_FILE_MAX_BYTES = 1024 * 1024;
+
+/**
+ * The text of a regular file of at most ENV_FILE_MAX_BYTES. It is opened without blocking and
+ * checked through the descriptor, so a FIFO or device cannot hold the daemon (opening a FIFO for
+ * reading would otherwise wait for a writer) and the file cannot change type after the check.
+ */
+function readEnvFile(file: string): string {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new RunError(`env file is not a regular file: ${file}`);
+    if (st.size > ENV_FILE_MAX_BYTES) {
+      throw new RunError(`env file is larger than ${ENV_FILE_MAX_BYTES} bytes: ${file}`);
+    }
+    const buf = Buffer.alloc(st.size);
+    let read = 0;
+    while (read < buf.length) {
+      const n = fs.readSync(fd, buf, read, buf.length - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    return buf.toString("utf8", 0, read);
+  } catch (err) {
+    if (err instanceof RunError) throw err;
+    throw new RunError(`could not read env file ${file}`);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 /** Filled in by `prepareRun` with the secret it was working on, so a failure can be audited. */
 export type FailedAt = { secretName?: string | undefined };
 
@@ -138,7 +171,7 @@ export function prepareRun(vault: Vault, p: RunParams, at: FailedAt = {}): Prepa
   const argv0 = p.argv[0] as string;
   const bundle = p.bundle === undefined ? undefined : resolveBundle(vault, p.bundle);
 
-  const command = resolveExecutable(argv0, p.cwd, p.baseEnv);
+  let command = resolveExecutable(argv0, p.cwd, p.baseEnv);
   if (command === undefined) throw new RunError(`command not found: ${argv0}`);
   if (bundle && bundle.exes.length > 0) {
     const real = realpathOrUndefined(command);
@@ -148,6 +181,9 @@ export function prepareRun(vault: Vault, p: RunParams, at: FailedAt = {}): Prepa
       return allowedReal !== undefined && canon(allowedReal) === canon(real);
     });
     if (!allowed) throw new ExeNotAllowedError(real);
+    // Start exactly the file that was checked, not a path (a symlink) that could be retargeted
+    // before the spawn. `argv0` below keeps the name the caller used.
+    command = real;
   }
 
   // Lowest layer first; a later layer replaces the same name from an earlier one.
@@ -163,13 +199,7 @@ export function prepareRun(vault: Vault, p: RunParams, at: FailedAt = {}): Prepa
   for (const [key, secret] of Object.entries(bundle?.env ?? {})) set(key, { secret });
   if (p.envFile !== undefined) {
     const file = path.resolve(p.cwd, p.envFile);
-    let text: string;
-    try {
-      text = fs.readFileSync(file, "utf8");
-    } catch {
-      throw new RunError(`could not read env file ${file}`);
-    }
-    for (const entry of parseEnvFile(text)) {
+    for (const entry of parseEnvFile(readEnvFile(file))) {
       if (entry.ref !== undefined) {
         set(entry.key, { secret: entry.ref });
       } else {
@@ -242,8 +272,13 @@ export type RunnerService = {
     run: PreparedRun,
     notify: (method: string, params: unknown) => void,
   ): Promise<RunResult>;
-  /** Write to or end the child's stdin. Only the connection that started the run may. */
-  stdin(owner: Connection, runId: string, data: Buffer | undefined, end: boolean): void;
+  /**
+   * Write to or end the child's stdin. Only the connection that started the run may. Resolves once
+   * the child's stdin has taken the data (drained), the stream has finished or closed, or the
+   * child is gone, so a client that awaits each call never gets ahead of a child that is not
+   * reading.
+   */
+  stdin(owner: Connection, runId: string, data: Buffer | undefined, end: boolean): Promise<void>;
   /** Send a signal to the child. Only the connection that started the run may. */
   signal(owner: Connection, runId: string, signal: NodeJS.Signals): void;
   /** SIGTERM every child tree, SIGKILL what is left after KILL_GRACE_MS, wait for them to go. */
@@ -434,9 +469,20 @@ export function createRunnerService(): RunnerService {
     stdin(owner, runId, data, end) {
       const { child } = owned(owner, runId);
       const { stdin } = child;
-      if (!stdin || stdin.destroyed || !stdin.writable) return;
-      if (data && data.length > 0) stdin.write(data);
+      if (!stdin || stdin.destroyed || !stdin.writable) return Promise.resolve();
+      const accepted = data && data.length > 0 ? stdin.write(data) : true;
       if (end) stdin.end();
+      if (accepted) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        const events = ["drain", "finish", "close", "error"] as const;
+        const done = () => {
+          for (const event of events) stdin.off(event, done);
+          child.off("exit", done);
+          resolve();
+        };
+        for (const event of events) stdin.once(event, done);
+        child.once("exit", done);
+      });
     },
 
     signal(owner, runId, signal) {

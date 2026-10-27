@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { createRedactor } from "../src/index.js";
-import { fakes } from "./fixtures/fake-keys.js";
+import { ALNUM, fakes } from "./fixtures/fake-keys.js";
 
 const run = (secrets: { name: string; value: string }[], chunks: string[]): string => {
   const r = createRedactor(secrets);
@@ -45,15 +45,43 @@ describe("redactor", () => {
     expect(run(secrets, ["hello ", "world"])).toBe("hello world");
   });
 
-  test("push holds back at most maxVariantLength - 1 chars", () => {
-    const r = createRedactor([{ name: "n", value: "SECRETVALUE" }]);
-    const longest = Math.max(
-      "SECRETVALUE".length,
-      Buffer.from("SECRETVALUE").toString("base64").length,
-    );
-    const out = r.push("x".repeat(100));
-    expect(out.length).toBe(100 - (longest - 1));
-    expect(out + r.flush()).toBe("x".repeat(100));
+  describe("hold-back", () => {
+    test("text that cannot start a secret is released at once (a prompt is not delayed)", () => {
+      const r = createRedactor(secrets);
+      expect(r.push("Password: ")).toBe("Password: ");
+      expect(r.push("x".repeat(100))).toBe("x".repeat(100));
+      expect(r.flush()).toBe("");
+    });
+
+    test("only the part that could still become a secret is held", () => {
+      const r = createRedactor(secrets);
+      expect(r.push(`Token: ${secret.slice(0, -1)}`)).toBe("Token: ");
+      expect(r.push("!")).toBe(`${secret.slice(0, -1)}!`); // it was not the secret after all
+      expect(r.flush()).toBe("");
+    });
+
+    test("a partial secret by itself yields nothing until it is resolved", () => {
+      const r = createRedactor(secrets);
+      expect(r.push(secret.slice(0, -1))).toBe("");
+      expect(r.push(secret.slice(-1))).toBe("");
+      expect(r.flush()).toBe("[redacted vault://gh]");
+    });
+
+    test("a prefix of an encoded form is held too", () => {
+      const b64 = Buffer.from(secret).toString("base64");
+      const r = createRedactor(secrets);
+      expect(r.push(`k=${b64.slice(0, 10)}`)).toBe("k=");
+      expect(r.push(`${b64.slice(10)}\n`)).toBe("[redacted vault://gh]\n");
+      expect(r.flush()).toBe("");
+    });
+
+    test("no timer: held text stays held however long nothing arrives", async () => {
+      const r = createRedactor(secrets);
+      expect(r.push(secret.slice(0, 12))).toBe("");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(r.push(secret.slice(12))).toBe("");
+      expect(r.flush()).toBe("[redacted vault://gh]");
+    });
   });
 
   test("flush empties the buffer; redactor is reusable", () => {
@@ -85,6 +113,56 @@ describe("redactor", () => {
     test("a variant equal to the raw value is ignored (no crash, still redacts)", () => {
       expect(run([{ name: "a", value: "abcdefgh" }], ["x abcdefgh y"])).toBe(
         "x [redacted vault://a] y",
+      );
+    });
+  });
+
+  describe("forms a child really prints", () => {
+    // A key the length of an OpenAI project key: its base64 is far longer than one wrapped line.
+    const long = `sk-proj-${Array.from({ length: 100 }, (_, i) => ALNUM[(i * 7 + 3) % ALNUM.length]).join("")}`;
+    const s = [{ name: "k", value: long }];
+    const b64 = Buffer.from(long).toString("base64");
+    const wrapped = (columns: number, lineBreak: string) =>
+      (b64.match(new RegExp(`.{1,${columns}}`, "g")) as string[]).join(lineBreak);
+
+    test("the secret is long enough that wrapping matters", () => {
+      expect(long.length).toBeGreaterThan(90);
+      expect(b64.length).toBeGreaterThan(76);
+    });
+
+    test.each([
+      [64, "\n"],
+      [64, "\r\n"],
+      [76, "\n"],
+      [76, "\r\n"],
+    ])("base64 wrapped at %i columns with %j", (columns, lineBreak) => {
+      const form = wrapped(columns, lineBreak);
+      expect(form).toContain(lineBreak);
+      // `base64` ends its output with a newline, which is not part of the secret.
+      expect(run(s, [`${form}\n`])).toBe("[redacted vault://k]\n");
+      for (let i = 1; i < form.length; i += 7) {
+        expect(run(s, [form.slice(0, i), `${form.slice(i)}\n`]), `split ${i}`).toBe(
+          "[redacted vault://k]\n",
+        );
+      }
+    });
+
+    test("lowercase %xx URL-encoding", () => {
+      const value = "https://user:p@ss/word+with=odd?bytes&more#frag";
+      const lower = encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase());
+      expect(lower).not.toBe(encodeURIComponent(value));
+      expect(run([{ name: "u", value }], [`q=${lower}&x=1`])).toBe("q=[redacted vault://u]&x=1");
+    });
+
+    test("inside JSON.stringify of an environment", () => {
+      const value = 'pa"ss\\word\nwith\tcontrol and "quotes"';
+      const text = JSON.stringify({ PATH: "/usr/bin", TOKEN: value, HOME: "/home/u" });
+      expect(text).not.toContain(value);
+      expect(run([{ name: "t", value }], [text])).toBe(
+        '{"PATH":"/usr/bin","TOKEN":"[redacted vault://t]","HOME":"/home/u"}',
+      );
+      expect(run(s, [JSON.stringify(process.env), JSON.stringify({ k: long })])).toBe(
+        `${JSON.stringify(process.env)}{"k":"[redacted vault://k]"}`,
       );
     });
   });

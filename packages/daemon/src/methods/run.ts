@@ -178,13 +178,16 @@ export const runMethods: Registry = {
   "run.stdin": {
     mutates: false,
     returnsSecret: false,
-    handler: (ctx, params) => {
+    handler: async (ctx, params) => {
+      // The reply waits until the child has taken the data: a client that awaits each call cannot
+      // get ahead of a child that is not reading. (A client that does not await can have at most
+      // MAX_IN_FLIGHT requests queued.)
       const p = paramsObject(params, ["runId", "dataB64", "end"]);
       const runId = reqRunId(p);
       const data = p.dataB64 === undefined ? undefined : reqBase64(p, "dataB64");
       if (p.end !== undefined && typeof p.end !== "boolean")
         throw invalid("end", "must be a boolean");
-      ctx.runner.stdin(ctx.connection, runId, data, p.end === true);
+      await ctx.runner.stdin(ctx.connection, runId, data, p.end === true);
       return { ok: true };
     },
   },
