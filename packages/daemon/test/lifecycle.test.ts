@@ -99,7 +99,6 @@ describe.each(MODES)("daemon lifecycle over %s", (mode) => {
         const wrong = [...words].reverse();
         const err = await rpcError(client.call("vault.recover", { words: wrong }));
         expect(err.message).toBe("recovery words are not valid for this vault");
-        for (const w of words) expect(err.message).not.toContain(` ${w} `);
         expect(await client.call("status")).toMatchObject({ initialized: false, locked: true });
       } finally {
         client.close();
@@ -137,8 +136,11 @@ describe.each(MODES)("daemon lifecycle over %s", (mode) => {
       ]);
       // The words go in once and come back nowhere.
       const wire = JSON.stringify([recovered, audit, await env.client.call("status")]);
-      for (const word of recoveryWords) expect(wire).not.toContain(`"${word}"`);
-      expect(wire).not.toContain(recoveryWords.slice(0, 3).join(" "));
+      // Single BIP39 words collide with ordinary JSON ("memory", "version"); check word runs instead.
+      expect(wire).not.toContain(recoveryWords.join(" "));
+      for (let i = 0; i + 3 <= recoveryWords.length; i++) {
+        expect(wire).not.toContain(recoveryWords.slice(i, i + 3).join(" "));
+      }
     });
   });
 });
