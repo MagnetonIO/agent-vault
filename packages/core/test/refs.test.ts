@@ -62,6 +62,14 @@ describe("parseEnvFile", () => {
     ]);
   });
 
+  test("lone CR line endings", () => {
+    expect(parseEnvFile("A=vault://x\rB=vault://y\rC=3")).toEqual([
+      { key: "A", ref: "x", line: 1 },
+      { key: "B", ref: "y", line: 2 },
+      { key: "C", literal: "3", line: 3 },
+    ]);
+  });
+
   test("export prefix", () => {
     expect(parseEnvFile("export A=1\nexport   B=vault://b\n  export C=3")).toEqual([
       { key: "A", literal: "1", line: 1 },

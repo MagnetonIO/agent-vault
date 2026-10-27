@@ -313,6 +313,14 @@ describe("queryAudit", () => {
     expect(() => queryAudit(v, { secretName: "b" })).toThrow(MetadataTamperError);
   });
 
+  test("a wrong-typed prev_hmac is tampering, not a RangeError", async () => {
+    const v = await env.newVault();
+    for (let i = 0; i < 3; i++) appendAudit(v, base);
+    env.withRawDb((db) => db.exec("UPDATE audit_log SET prev_hmac = 5 WHERE seq = 2"));
+    expect(() => queryAudit(v, {})).toThrow(MetadataTamperError);
+    expect(verifyAudit(v)).toEqual({ ok: false, brokenAtSeq: 2 });
+  });
+
   test("returned events carry exactly the allowlisted keys", async () => {
     const v = await env.newVault();
     const e = appendAudit(v, { ...base, harness: "codex" });

@@ -101,6 +101,15 @@ function rowMac(auditKey: Uint8Array, prev: Uint8Array, eventJson: string): Uint
   return mac(auditKey, data);
 }
 
+/** Column types are not enforced by SQLite; a row edited to hold the wrong type is tampered. */
+function hasSaneTypes(row: AuditRow): boolean {
+  return (
+    row.prev_hmac instanceof Uint8Array &&
+    row.hmac instanceof Uint8Array &&
+    typeof row.event_json === "string"
+  );
+}
+
 /**
  * Append an event to the hash chain: `hmac = HMAC(auditKey, prev_hmac || event_json)`, with 32 zero
  * bytes as the genesis `prev_hmac`. Unknown keys, bad enums and over-long strings throw
@@ -146,6 +155,7 @@ export function verifyAudit(v: Vault): { ok: true } | { ok: false; brokenAtSeq: 
     if (rows.length === 0) return { ok: true };
     for (const row of rows) {
       const good =
+        hasSaneTypes(row) &&
         row.seq === expected &&
         macEqual(row.prev_hmac, prev) &&
         macEqual(rowMac(auditKey, row.prev_hmac, row.event_json), row.hmac);
@@ -186,7 +196,10 @@ export function queryAudit(
     if (rows.length === 0) break;
     for (const row of rows) {
       before = row.seq;
-      if (!macEqual(rowMac(auditKey, row.prev_hmac, row.event_json), row.hmac)) {
+      if (
+        !hasSaneTypes(row) ||
+        !macEqual(rowMac(auditKey, row.prev_hmac, row.event_json), row.hmac)
+      ) {
         throw new MetadataTamperError(String(row.seq), KIND);
       }
       const e = JSON.parse(row.event_json) as AuditEvent;

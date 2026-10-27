@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS bundle_exes (
 
 CREATE TABLE IF NOT EXISTS audit_log (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts TEXT NOT NULL,
+  ts TEXT NOT NULL, -- unsigned: trust event_json.ts instead
   event_json TEXT NOT NULL,
   prev_hmac BLOB NOT NULL,
   hmac BLOB NOT NULL

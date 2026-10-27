@@ -56,7 +56,9 @@ function parseValue(raw: string): string {
  */
 export function parseEnvFile(text: string): EnvEntry[] {
   const out: EnvEntry[] = [];
-  const lines = String(text).replace(/^﻿/, "").split(/\r?\n/);
+  const lines = String(text)
+    .replace(/^﻿/, "")
+    .split(/\r\n|\r|\n/);
   lines.forEach((full, i) => {
     const line = full.trimStart();
     if (line === "" || line.startsWith("#")) return;
