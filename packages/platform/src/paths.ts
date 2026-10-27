@@ -17,15 +17,15 @@ function xdg(value: string | undefined): string | undefined {
 
 /**
  * Where the vault keeps its files. `env` and `platform` are injectable so tests never read the
- * real environment. `AGENT_VAULT_HOME` moves everything, runtimeDir included: a sandboxed run must
- * not reach `$XDG_RUNTIME_DIR`.
+ * real environment. `AGENT_VAULT_HOME` (made absolute) moves everything, runtimeDir included: a
+ * sandboxed run must not reach `$XDG_RUNTIME_DIR`.
  */
 export function getPaths(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): VaultPaths {
   const p = platform === "win32" ? path.win32 : path.posix;
-  const override = env.AGENT_VAULT_HOME || undefined;
+  const override = env.AGENT_VAULT_HOME ? p.resolve(env.AGENT_VAULT_HOME) : undefined;
   const home = () => env.HOME || os.homedir();
 
   let dataDir: string;

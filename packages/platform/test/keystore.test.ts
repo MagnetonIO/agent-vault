@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomKey } from "@agent-vault/crypto";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   KeyfileCorruptError,
   KeyringUnavailableError,
@@ -200,11 +200,62 @@ describe("mapKeyringError", () => {
     expect((mapped as Error).name).toBe("KeyringUnavailableError");
   });
 
+  test("keeps the original error as cause", () => {
+    const original = new Error("Secret Service: no result found");
+    expect((mapKeyringError(original) as Error).cause).toBe(original);
+  });
+
   test("any other error comes back unchanged", () => {
     const e = new Error("Platform failure: something else");
     expect(mapKeyringError(e)).toBe(e);
     const s = "a string";
     expect(mapKeyringError(s)).toBe(s);
+  });
+});
+
+describe("openOsKeyring load() validates the stored value", () => {
+  // Entry is mocked so no real credential store is touched.
+  const loadWith = async (stored: string | null) => {
+    vi.resetModules();
+    vi.doMock("@napi-rs/keyring", () => ({
+      Entry: class {
+        getPassword() {
+          return stored;
+        }
+      },
+    }));
+    const m = await import("../src/keystore.js");
+    return m.openOsKeyring("av-test-mock").load();
+  };
+  afterEach(() => {
+    vi.doUnmock("@napi-rs/keyring");
+    vi.resetModules();
+  });
+
+  test("a 32-byte value loads", async () => {
+    const k = randomKey();
+    expect(await loadWith(Buffer.from(k).toString("base64"))).toEqual(k);
+  });
+
+  test("a missing entry is null", async () => {
+    expect(await loadWith(null)).toBeNull();
+  });
+
+  test.each([
+    ["too short", Buffer.alloc(31, 7).toString("base64")],
+    ["too long", Buffer.alloc(33, 7).toString("base64")],
+    ["empty", ""],
+  ])("%s: typed error, no value bytes in the message", async (_n, stored) => {
+    const err = await loadWith(stored).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf((await import("../src/keystore.js")).KeyringValueInvalidError);
+    expect((err as Error).name).toBe("KeyringValueInvalidError");
+    expect((err as Error).message).not.toContain(stored || "\0");
+  });
+
+  test("non-base64 is rejected without echoing it", async () => {
+    const err = await loadWith("s3cr3t-not-base64!!").catch((e: unknown) => e);
+    expect((err as Error).name).toBe("KeyringValueInvalidError");
+    expect((err as Error).message).not.toContain("s3cr3t");
   });
 });
 

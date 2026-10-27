@@ -4,6 +4,7 @@ export type { RootKeyStore } from "./keystore.js";
 export {
   KeyfileCorruptError,
   KeyringUnavailableError,
+  KeyringValueInvalidError,
   MemoryKeyStore,
   mapKeyringError,
   openKeyfileStore,

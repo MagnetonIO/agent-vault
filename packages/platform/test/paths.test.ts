@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { getPaths } from "../src/index.js";
 
@@ -121,6 +122,18 @@ describe("getPaths", () => {
         backupsDir: "D:\\av\\backups",
         dbFile: "D:\\av\\vault.db",
       });
+    });
+
+    test("a relative value is made absolute", () => {
+      const got = getPaths({ HOME: "/h", AGENT_VAULT_HOME: "rel/av" }, "linux");
+      expect(got.dataDir).toBe(path.posix.resolve("rel/av"));
+      expect(path.posix.isAbsolute(got.runtimeDir)).toBe(true);
+    });
+
+    test("a trailing slash and dot segments are normalized", () => {
+      expect(getPaths({ HOME: "/h", AGENT_VAULT_HOME: "/tmp/x/../av/" }, "linux").dataDir).toBe(
+        "/tmp/av",
+      );
     });
 
     test("empty value is ignored", () => {

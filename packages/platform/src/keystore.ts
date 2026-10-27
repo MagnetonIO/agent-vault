@@ -13,9 +13,18 @@ export interface RootKeyStore {
 }
 
 export class KeyringUnavailableError extends Error {
-  constructor() {
-    super("No Secret Service found. Run: agent-vault init --keystore keyfile");
+  /** `cause` is the original keyring error, for diagnosis; the message is fixed. */
+  constructor(cause?: unknown) {
+    super("No Secret Service found. Run: agent-vault init --keystore keyfile", { cause });
     this.name = "KeyringUnavailableError";
+  }
+}
+
+/** The keyring entry exists but does not hold a 32-byte key. Reports sizes only, never bytes. */
+export class KeyringValueInvalidError extends Error {
+  constructor(reason: string) {
+    super(`OS keyring entry for the device root key is invalid: ${reason}`);
+    this.name = "KeyringValueInvalidError";
   }
 }
 
@@ -62,11 +71,14 @@ const SECRET_SERVICE_DOWN = [
 /** The typed error for the known "no Secret Service" failures; anything else is returned as is. */
 export function mapKeyringError(err: unknown): unknown {
   const message = err instanceof Error ? err.message : String(err);
-  return SECRET_SERVICE_DOWN.some((s) => message.includes(s)) ? new KeyringUnavailableError() : err;
+  return SECRET_SERVICE_DOWN.some((s) => message.includes(s))
+    ? new KeyringUnavailableError(err)
+    : err;
 }
 
 const SERVICE = "agent-vault";
 const DEVICE_ROOT_KEY = "device-root-key";
+const ROOT_KEY_LEN = 32;
 
 /**
  * The device root key in the OS credential store, stored as base64. On Linux the Entry is pinned
@@ -86,7 +98,13 @@ export function openOsKeyring(account: string = DEVICE_ROOT_KEY): RootKeyStore {
     kind: "os-keyring",
     async load() {
       const b64 = guard(() => entry().getPassword());
-      return b64 === null || b64 === undefined ? null : Uint8Array.from(Buffer.from(b64, "base64"));
+      if (b64 === null || b64 === undefined) return null;
+      const key = Buffer.from(b64, "base64");
+      if (key.toString("base64") !== b64) throw new KeyringValueInvalidError("not valid base64");
+      if (key.length !== ROOT_KEY_LEN) {
+        throw new KeyringValueInvalidError(`expected ${ROOT_KEY_LEN} bytes, found ${key.length}`);
+      }
+      return Uint8Array.from(key);
     },
     async save(k) {
       guard(() => entry().setPassword(Buffer.from(k).toString("base64")));
