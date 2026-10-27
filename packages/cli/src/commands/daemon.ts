@@ -1,5 +1,12 @@
 import fs from "node:fs";
-import { DaemonAlreadyRunningError, recoveryInProgress, startDaemon } from "@agent-vault/daemon";
+import {
+  DaemonAlreadyRunningError,
+  installService,
+  recoveryInProgress,
+  ServiceError,
+  startDaemon,
+  uninstallService,
+} from "@agent-vault/daemon";
 import {
   getPaths,
   openKeyfileStore,
@@ -19,6 +26,7 @@ import {
 import { LOCKED_MESSAGE, RECOVERY_IN_PROGRESS } from "../context.js";
 import { stopDaemon } from "../daemon-control.js";
 import { CliError, exitWith } from "../errors.js";
+import { say, warn } from "../output.js";
 import { isTty, promptPassphrase } from "../tty.js";
 
 const STDIN_PASSPHRASE_TIMEOUT_MS = 5000;
@@ -105,6 +113,31 @@ async function runDaemon(opts: { passphraseStdin?: boolean; recovering?: boolean
   await exitWith(0);
 }
 
+/** Service-manager failures are the user's to fix: print the message, not a stack. */
+async function viaService<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof ServiceError) throw new CliError(err.message);
+    throw err;
+  }
+}
+
+async function installDaemon(): Promise<void> {
+  const keystore = readConfig(getPaths());
+  const { unitFile, warnings, notes } = await viaService(() => installService({ keystore }));
+  say(unitFile ? `installed ${unitFile}` : "registered the logon task agent-vault-daemon");
+  for (const note of notes) say(note);
+  for (const w of warnings) warn(w);
+}
+
+async function uninstallDaemon(): Promise<void> {
+  const { unitFile, warnings, installed } = await viaService(() => uninstallService({}));
+  for (const w of warnings) warn(`warning: ${w}`);
+  if (!installed) say("not installed");
+  else say(unitFile ? `removed ${unitFile}` : "removed the logon task agent-vault-daemon");
+}
+
 export function daemonCommand(program: Command): void {
   const daemon = program
     .command("daemon")
@@ -126,4 +159,9 @@ export function daemonCommand(program: Command): void {
     .command("stop")
     .description("stop vaultd")
     .action(async () => stopDaemon(getPaths()));
+  daemon
+    .command("install")
+    .description("start vaultd at login (launchd, systemd --user, or Task Scheduler)")
+    .action(installDaemon);
+  daemon.command("uninstall").description("remove the login service").action(uninstallDaemon);
 }

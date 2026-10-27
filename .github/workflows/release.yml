@@ -1,0 +1,76 @@
+name: release
+
+# Builds the single-file CLI (Node SEA) for the five targets and runs `agent-vault status` on each.
+# It publishes nothing: no npm, no GitHub release. Tags and manual runs just leave the binaries as
+# workflow artifacts.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  # The exact Node the binaries embed (Spike S1: node:sqlite is young, so releases pin it).
+  NODE_VERSION: 24.22.1
+
+jobs:
+  sea:
+    name: sea (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: darwin-arm64 }
+          - { os: macos-15-intel, target: darwin-x64 }
+          - { os: ubuntu-latest, target: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+          - { os: windows-latest, target: win32-x64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Runner is the target and Node is the pin
+        run: |
+          test "$(node -p 'process.platform + "-" + process.arch')" = "${{ matrix.target }}"
+          test "$(node -v)" = "v$NODE_VERSION"
+      - run: pnpm i --frozen-lockfile
+      - run: pnpm dist
+      - name: Build smoke test
+        env:
+          AGENT_VAULT_TEST_SEA: "1"
+          # `pnpm dist` above built it; the test only runs it.
+          AGENT_VAULT_SEA_PREBUILT: "1"
+        run: pnpm vitest run test/e2e/sea.test.ts
+
+      # A temp vault with the keyfile store, so no keychain or Secret Service is needed. `status`
+      # starts the daemon from the binary itself, so this also proves the self-spawn.
+      - name: agent-vault status
+        run: |
+          bin="dist-sea/${{ matrix.target }}/agent-vault"
+          if [ "$RUNNER_OS" = Windows ]; then bin="$bin.exe"; fi
+          export AGENT_VAULT_HOME="$RUNNER_TEMP/av-home"
+          export AGENT_VAULT_KEYFILE_PASSPHRASE="release smoke passphrase"
+          mkdir -p "$AGENT_VAULT_HOME"
+          echo '{"keystore":"keyfile"}' > "$AGENT_VAULT_HOME/config.json"
+          "$bin" --version
+          "$bin" status | tee status.log
+          grep -E '^initialized +no$' status.log
+          "$bin" daemon stop
+
+      - name: Package
+        run: tar -czf "agent-vault-${{ matrix.target }}.tar.gz" -C dist-sea "${{ matrix.target }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: agent-vault-${{ matrix.target }}
+          path: agent-vault-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
