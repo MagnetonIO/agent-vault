@@ -1,0 +1,40 @@
+# Fix 4 raw output: spikes/s3-hooks/run-sessionend-scrub.sh <mode>, run 2026-10-27 (modes: blocked, unblocked, noscrub-blocked).
+# Canary is a fresh fake AVCANARY_<uuid4> per run. Sandbox paths replaced with <SANDBOX>.
+# 'canary in line' rows are the control (no scrub hook) and name the transcript line that holds the canary.
+
+# mode=blocked claude=2.1.311 (Claude Code)
+run1 exit=0 result={"is_error":false,"num_turns":0,"duration_api_ms":0,"result":"UserPromptSubmit operation blocked by hook:\nagent-vault spike: canary detected and stored (fake). Key not sent to model."}
+hook log (scrub + transcript-at-hook-time):
+  {"at":"transcript-at-hook-time","event":"UserPromptSubmit","exists":false,"hasCanary":false}
+  {"at":"scrub-hook","event":"SessionEnd","hitsBefore":1,"hitsAfter":0}
+transcript after run1 (canary hits=0):
+  lines=5 invalid_json_lines=0
+history.jsonl present: no
+run2 (--resume) exit=0 {"is_error":false,"session_id_same":true,"num_turns":1,"result":"ok"}
+mock requests on resume: n=2 withCanary=0 withMarker=0
+transcript after run2 (canary hits=0):
+  lines=28 invalid_json_lines=0
+files in sandbox holding canary, excluding hook/mock logs and CLI stdout: 0
+
+# mode=unblocked claude=2.1.311 (Claude Code)
+run1 exit=0 result={"is_error":false,"num_turns":1,"duration_api_ms":7,"result":"ok"}
+hook log (scrub + transcript-at-hook-time):
+  {"at":"scrub-hook","event":"SessionEnd","hitsBefore":4,"hitsAfter":0}
+transcript after run1 (canary hits=0):
+  lines=22 invalid_json_lines=0
+history.jsonl present: no
+run2 (--resume) exit=0 {"is_error":false,"session_id_same":true,"num_turns":1,"result":"ok"}
+mock requests on resume: n=2 withCanary=0 withMarker=1
+transcript after run2 (canary hits=0):
+  lines=32 invalid_json_lines=0
+files in sandbox holding canary, excluding hook/mock logs and CLI stdout: 0
+
+# mode=noscrub-blocked claude=2.1.311 (Claude Code)
+run1 exit=0 result={"is_error":false,"num_turns":0,"duration_api_ms":0,"result":"UserPromptSubmit operation blocked by hook:\nagent-vault spike: canary detected and stored (fake). Key not sent to model."}
+hook log (scrub + transcript-at-hook-time):
+  {"at":"transcript-at-hook-time","event":"UserPromptSubmit","exists":false,"hasCanary":false}
+transcript after run1 (canary hits=1):
+  canary in line type=queue-operation op=enqueue fields=content
+  lines=5 invalid_json_lines=0
+history.jsonl present: no
+

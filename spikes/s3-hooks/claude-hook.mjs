@@ -26,7 +26,7 @@ if (log && input.transcript_path) {
   const has = exists && readFileSync(input.transcript_path, "utf8").includes("AVCANARY_");
   appendFileSync(
     log,
-    `${JSON.stringify({ at: "transcript-at-hook-time", exists, hasCanary: has })}\n`,
+    `${JSON.stringify({ at: "transcript-at-hook-time", event: input.hook_event_name, exists, hasCanary: has })}\n`,
   );
 }
 if (log) appendFileSync(log, `${JSON.stringify({ at: "stdout", raw: s })}\n`);

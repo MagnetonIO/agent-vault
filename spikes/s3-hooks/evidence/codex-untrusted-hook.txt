@@ -1,0 +1,16 @@
+# Raw output: spikes/s3-hooks/run-codex-trust.sh, run 2026-10-27. Codex 0.164.0, hooks.json present but NEVER trusted (no [hooks.state] entry).
+# Model endpoint is the local mock-400.mjs (provider base_url 127.0.0.1); nothing was sent to api.openai.com in this run.
+# Result: hook ran 0 times, the prompt (with the fake canary) reached the model endpoint, no hook/trust warning on stdout/stderr. That is the fail-open.
+
+# codex=codex-cli 0.164.0
+codex exec exit=1
+hook log lines (0 = hook never ran): 0
+mock log (model endpoint saw the prompt?):
+  {"url":"/v1/responses","bytes":39628,"bodyHasCanary":true,"bodyHasRedacted":false}
+stderr/stdout lines mentioning hook/trust/review (0 = no visible warning): 0
+stdout head:
+stderr head:
+  WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir "<SANDBOX>" (codex_home: AbsolutePathBuf("<SANDBOX>/codex"))
+  Reading additional input from stdin...
+  OpenAI Codex v0.164.0
+  --------

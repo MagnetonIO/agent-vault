@@ -124,13 +124,13 @@ Three paths, strongest first:
 | Path | How | Does the key touch the harness? | Status |
 |------|-----|---------------------------------|--------|
 | **A. Out-of-band (primary)** | `agent-vault grab <name>` reads the clipboard, stores the key, clears the clipboard, and prints `stored github/pat (ghp_, 40 chars)`. Inside a harness: `! agent-vault grab github/pat` (the command line holds no secret). Or MCP `vault_capture` → **URL-mode elicitation** → vaultd's one-time page `http://127.0.0.1:<port>/capture/<nonce>` | **No** | Buildable now |
-| **B. Prompt safety net** | `UserPromptSubmit` hook detects a key → stores it → **blocks** the prompt → tells the user the reference name | **Yes:** it reaches local disk but not the model | Claude Code ✅ · Codex ✅ · OpenCode ⚠️ (no block; `session.context` redacts what the model sees; the DB keeps the text). Measured in S3 |
+| **B. Prompt safety net** | `UserPromptSubmit` hook detects a key → stores it → **blocks** the prompt → tells the user the reference name | **Yes:** it reaches local disk but not the model | Claude Code ✅ · Codex ⚠️ **fail-open until the hook is trusted** (`/hooks` → `t`; an untrusted hook is silently skipped and the prompt goes to the model; re-check with `doctor` after every Codex upgrade) · OpenCode ⚠️ (no block; can redact or reject via `session.context`/`session.title`, but text stays in `opencode.db`). Measured in S3 |
 | **C. Files** | `agent-vault import .env` and `agent-vault migrate` move values into the vault and rewrite them to references | Already on disk → rewritten | Buildable now |
 
 **How Path B works (checked against harness docs 2026-10-26):**
-1. Block with `suppressOriginalPrompt: true`. **The key never reaches the model.**
+1. Block with `suppressOriginalPrompt: true`. **The key never reaches the model.** Codex exception: the hook must be **trusted** first. Install cannot forge the trust hash; the user runs `/hooks` and presses `t`. Until then the hook is skipped silently (fail-open) and the prompt is sent. `doctor` proves the hook fires with a probe canary and repeats the check after each Codex upgrade.
 2. Store the key in the vault.
-3. Scrub what the harness left on disk (measured in S3, `docs/spikes/s3-harness-hooks.md`). Hooks can't rewrite prompts. Residue differs: Claude `-p` writes one `queue-operation` transcript line (**after** the hook returns, so scrub on `SessionEnd` and sweep at the next `SessionStart`; `Stop` doesn't fire after a block); Claude's TUI and `codex exec` leave nothing; Codex's TUI leaves a `history.jsonl` line unless `history.persistence = "none"`; OpenCode keeps the message in `opencode.db`. The Codex transcript format "isn't a stable interface", so the scrubber must tolerate format changes, be binary-safe (sqlite files need a same-length rewrite) and re-validate JSONL afterwards.
+3. Scrub what the harness left on disk (measured in S3, `docs/spikes/s3-harness-hooks.md`). Hooks can't rewrite prompts. Residue differs: Claude `-p` writes one `queue-operation` transcript line (**after** the hook returns, so scrub on `SessionEnd` (measured working in `-p`: transcript stays valid JSONL, `--resume` OK; long-lived TUI untested) and sweep at the next `SessionStart` as the fallback; `Stop` doesn't fire after a block); Claude's TUI and `codex exec` leave nothing; Codex's TUI leaves a `history.jsonl` line unless `history.persistence = "none"`; OpenCode keeps the message in `opencode.db`. The Codex transcript format "isn't a stable interface", so the scrubber must tolerate format changes, be binary-safe (sqlite files need a same-length rewrite) and re-validate JSONL afterwards.
 4. Tag the secret `exposed-locally` and suggest rotation.
 5. **Route to 100% off-disk:** Path A today, plus an upstream prompt-rewrite hook in each harness (Open question 3).
 
@@ -222,7 +222,7 @@ Path handling goes through one `paths` module: XDG on Linux, `%LOCALAPPDATA%` on
 | ~~`get`~~ → `reveal` | **Not in MVP.** Phase 2: human-presence gate, TTY-only output |
 | `import <.env>` / `migrate` | Move plaintext values → vault and rewrite them to `vault://` references (`.env`, `.mcp.json`, `~/.claude.json`, `~/.codex/config.toml`, `opencode.json`) |
 | `scan` | Find keys already leaked into harness history/transcripts |
-| `install` / `uninstall` / `doctor <harness>` | Harness adapters (see table above) |
+| `install` / `uninstall` / `doctor <harness>` | Harness adapters (see table above). `doctor codex` must prove the `UserPromptSubmit` hook is **trusted and fires** (probe canary blocked), not just present in `hooks.json`; rerun after Codex upgrades. Untrusted = silently skipped = fail-open |
 | `run [--bundle] [--env-file] -- <cmd>` | Process injection with output redaction |
 | `helper <service>` | Credential-helper output for harness model keys (`apiKeyHelper`, `auth.command`) |
 | `service add` / `bundle create` / `grant` / `session create` | Admin ops; human-presence gate in Phase 2 |

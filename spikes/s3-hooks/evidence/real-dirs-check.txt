@@ -1,14 +1,14 @@
 # before/after (mtime epoch, size). Only stat was used; file contents were never read.
 ## before (start of spike)
-/Users/mlong/.claude/settings.json 1793065416 9148
-/Users/mlong/.claude.json 1793069093 512057
-/Users/mlong/.codex/config.toml 1793034946 138011
-/Users/mlong/.codex/history.jsonl 1793066678 2873506
+~/.claude/settings.json 1793065416 9148
+~/.claude.json 1793069093 512057
+~/.codex/config.toml 1793034946 138011
+~/.codex/history.jsonl 1793066678 2873506
 ## after (end of spike, sandbox deleted)
-/Users/mlong/.claude/settings.json 1793065416 9148
-/Users/mlong/.claude.json 1793070326 512412
-/Users/mlong/.codex/config.toml 1793069810 138011
-/Users/mlong/.codex/history.jsonl 1793066678 2873506
+~/.claude/settings.json 1793065416 9148
+~/.claude.json 1793070326 512412
+~/.codex/config.toml 1793069810 138011
+~/.codex/history.jsonl 1793066678 2873506
 ## result
 UNCHANGED: ~/.claude/settings.json, ~/.codex/history.jsonl (mtime and size equal).
 CHANGED:   ~/.claude.json (size +355, mtime moves on every check) and ~/.codex/config.toml (mtime only, size equal).

@@ -1,0 +1,17 @@
+# Raw: grep -a -c -F <string> over the installed OpenCode binary (read only; the binary was not executed for this). 2026-10-27.
+# Counts are matching LINES in a 214 MB binary. 0 = string absent. Presence is not proof a plugin hook fires; see opencode-hook-shapes.jsonl for hooks that fired.
+# binary: ~/.opencode/bin/opencode (OpenCode 2.1.4)
+chat.message: 0
+chat.params: 0
+experimental.chat.messages.transform: 0
+tool.execute.before: 0
+shell.env: 0
+session.context: 6
+session.title: 5
+execute.before: 5
+permission.ask: 9
+shell.hook: 1
+event.subscribe: 16
+message.updated: 2
+message.part.updated: 2
+Plugin must export a default definition: 2

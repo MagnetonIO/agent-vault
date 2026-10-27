@@ -1,0 +1,29 @@
+# Raw output: spikes/s3-hooks/run-apikeyhelper.sh, run 2026-10-27. Replaces the hand-written summary in env-probe.txt.
+# Real Bash tool call (env | grep -c AVCANARY_) requested by mock-anthropic.mjs; env-probe-hook.mjs counts canary vars in each hook's env.
+# <CANARY> is the fake key; the mock redacts it before logging.
+
+# claude=2.1.311 (Claude Code)
+## run=helper exit=0 (canary shown as <CANARY>)
+hook env probe (event,count,keys):
+  {"event":"SessionStart","count":0,"keys":[],"anthropicApiKeySet":false}
+  {"event":"UserPromptSubmit","count":0,"keys":[],"anthropicApiKeySet":false}
+  {"event":"PreToolUse","count":0,"keys":[],"anthropicApiKeySet":false}
+  {"event":"PostToolUse","count":0,"keys":[],"anthropicApiKeySet":false}
+  {"event":"Stop","count":0,"keys":[],"anthropicApiKeySet":false}
+mock log:
+  {"url":"/api/hello","hasBash":false,"hasToolResult":false,"bodyHasCanary":false,"bodyHasRedacted":false}
+  {"url":"/v1/messages?beta=true","x-api-key":"<CANARY>","authorization":"Bearer <CANARY>","stream":true,"hasBash":true,"hasToolResult":false,"bodyHasCanary":false,"bodyHasRedacted":false}
+  {"url":"/v1/messages?beta=true","x-api-key":"<CANARY>","authorization":"Bearer <CANARY>","stream":true,"hasBash":true,"hasToolResult":true,"bodyHasCanary":false,"bodyHasRedacted":false}
+  {"tool_result":["\"0\""]}
+## run=control exit=0 (canary shown as <CANARY>)
+hook env probe (event,count,keys):
+  {"event":"SessionStart","count":1,"keys":["ANTHROPIC_API_KEY"],"anthropicApiKeySet":true}
+  {"event":"UserPromptSubmit","count":1,"keys":["ANTHROPIC_API_KEY"],"anthropicApiKeySet":true}
+  {"event":"PreToolUse","count":1,"keys":["ANTHROPIC_API_KEY"],"anthropicApiKeySet":true}
+  {"event":"PostToolUse","count":1,"keys":["ANTHROPIC_API_KEY"],"anthropicApiKeySet":true}
+  {"event":"Stop","count":1,"keys":["ANTHROPIC_API_KEY"],"anthropicApiKeySet":true}
+mock log:
+  {"url":"/api/hello","hasBash":false,"hasToolResult":false,"bodyHasCanary":false,"bodyHasRedacted":false}
+  {"url":"/v1/messages?beta=true","x-api-key":"<CANARY>","stream":true,"hasBash":true,"hasToolResult":false,"bodyHasCanary":false,"bodyHasRedacted":false}
+  {"url":"/v1/messages?beta=true","x-api-key":"<CANARY>","stream":true,"hasBash":true,"hasToolResult":true,"bodyHasCanary":false,"bodyHasRedacted":false}
+  {"tool_result":["\"1\""]}
