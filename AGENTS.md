@@ -26,3 +26,18 @@ TypeScript / Node 24 pnpm monorepo (ESM, `tsc -b` project references, Vitest, Bi
 - Commit after every task (conventional commits).
 - pnpm 12 blocks unreviewed install scripts; each native dep needs an explicit `allowBuilds` entry in `pnpm-workspace.yaml`.
 - CI must be green on macOS, Linux, and Windows.
+- Test fixtures build every key-shaped value at runtime (see `packages/detect/test/fixtures/fake-keys.ts`). Never put a string literal next to a `KEY`/`TOKEN`/`SECRET`/`PASSWORD` field. `.gitguardian.yaml` keeps scanners off `packages/*/test`, `test/e2e`, and `spikes`.
+
+## Parallel work (worktrees)
+
+Independent tasks run in parallel, one git worktree per task.
+
+| Step | Command / rule |
+|---|---|
+| 1. Create | `git worktree add ../agent-vault-wt/<task> -b claude/<task> feat/mvp`, then `pnpm i --frozen-lockfile && pnpm build` inside it |
+| 2. Work | One agent per worktree. Agents edit only their own worktree and push only their own `claude/<task>` branch. Branch names must start with `claude/` |
+| 3. Verify | CI runs on `claude/**` pushes; it must be green on all 3 OSes before merge |
+| 4. Merge | The controller merges into `feat/mvp` with `git merge --no-ff claude/<task>`. CLI commands register in `packages/cli/src/program.ts`; on lockfile conflicts run `pnpm i`. Then rerun `pnpm build && pnpm typecheck && pnpm test && pnpm lint` and push |
+| 5. Clean up | Once merged and CI is green: `git worktree remove ../agent-vault-wt/<task>`, `git branch -d claude/<task>`, `git push origin --delete claude/<task>` |
+
+Never push tags or publish to npm from a worktree. Stop each agent as soon as it reports; resume it only for a fix round.
