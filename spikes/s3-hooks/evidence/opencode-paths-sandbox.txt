@@ -1,0 +1,10 @@
+home       <SANDBOX>/oc/home
+data       <SANDBOX>/oc/data/opencode
+cache      <SANDBOX>/oc/cache/opencode
+config     <SANDBOX>/oc/config/opencode
+state      <SANDBOX>/oc/state/opencode
+tmp        <SANDBOX>/oc/tmp/opencode
+bin        <SANDBOX>/oc/cache/opencode/bin
+log        <SANDBOX>/oc/data/opencode/log
+repos      <SANDBOX>/oc/data/opencode/repos
+db         <SANDBOX>/oc/data/opencode/opencode.db

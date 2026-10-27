@@ -1,0 +1,25 @@
+# Every file/field holding the canary after each scenario (grep -rla over the whole sandbox; -a is required, plain grep -rl skips sqlite).
+# <cfg> = sandbox config/data dir. Canary is fake: AVCANARY_<uuid4>.
+
+## Claude Code 2.1.311
+scenario                                   | files containing canary                                   | field
+-p, blocked, suppressOriginalPrompt:true   | <cfg>/projects/<proj>/<session>.jsonl                     | type=queue-operation (operation=enqueue) .content
+-p, blocked, suppress NOT set              | same file                                                 | queue-operation .content AND type=system subtype=informational .content ("Original prompt: ...")
+                                           |                                                           | (also printed in the -p JSON "result")
+interactive TUI, blocked, suppress:true    | NONE (transcript has only the block message; history.jsonl has only "/exit") |
+-p, NOT blocked (hook missed it)           | <cfg>/projects/<proj>/<session>.jsonl                     | queue-operation .content ; user .message.content ; api-request-blob .message.content[1].text ; last-prompt .lastPrompt
+history.jsonl is only written by the interactive TUI; -p never creates it.
+At UserPromptSubmit hook time (-p): transcript file does NOT exist yet (exists=false). At SessionEnd: exists with canary.
+
+## Codex 0.164.0
+codex exec, blocked                        | NONE
+TUI, blocked, default [history]            | <CODEX_HOME>/history.jsonl                                | {"session_id","ts","text"}   (see codex-history-line.json)
+TUI, blocked, [history] persistence="none" | NONE
+exec, NOT blocked (hooks disabled)         | sessions/YYYY/MM/DD/rollout-*.jsonl                       | response_item(message, role=user).content ; event_msg item_completed .item
+                                           | state_5.sqlite, state_5.sqlite-wal, thread_history_1.sqlite, thread_history_1.sqlite-wal | (binary; not decoded)
+At hook time: rollout exists, canary not in it yet.
+
+## OpenCode 2.1.4 (all runs: opencode run --standalone, sandboxed XDG dirs)
+run, NOT blocked/mutated                   | <XDG_DATA_HOME>/opencode/opencode.db                      | table session_message, column data (JSON): {"time":..,"text":"\"<CANARY>\"","files":[]}
+                                           | <XDG_DATA_HOME>/opencode/log/opencode.log                 | "cli starting ... args=[run,--standalone,\"<msg>\"]"  (argv of `opencode run <msg>`)
+session.context hook mutated the outbound copy: model request bodies had no canary, but opencode.db STILL holds it (persisted before the hook).

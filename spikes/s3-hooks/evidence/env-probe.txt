@@ -1,0 +1,10 @@
+# Step 4 result. Not a proxy: a REAL Bash tool call ran (`env | grep -c AVCANARY_`), requested by a local fake Anthropic API
+# (spikes/s3-hooks/mock-anthropic.mjs on 127.0.0.1) so no model/credentials were needed. env -i, CLAUDE_CONFIG_DIR sandboxed.
+# apiKeyHelper = spikes/s3-hooks/api-key-helper.sh, prints the canary. Probe hook = env-probe-hook.mjs on SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop.
+
+run                                   | hook env count | Bash tool_result | mock saw x-api-key / Authorization
+apiKeyHelper prints canary            | 0 (all 5 events) | "0"            | x-api-key=<CANARY>, Authorization=Bearer <CANARY>   (helper output IS what Claude sends)
+positive control: ANTHROPIC_API_KEY=<CANARY> in env | 1 (ANTHROPIC_API_KEY, all 5 events) | "1" | same
+
+=> apiKeyHelper output is NOT exported to Bash-tool subprocesses or hook processes. A key placed in the harness env (ANTHROPIC_API_KEY) IS exported to both.
+Docs (code.claude.com/docs/en/hooks): "A hook process inherits the parent environment, apart from the OTEL_* exporter variables..." (consistent with the control).

@@ -1,0 +1,4 @@
+{
+  "decision": "block",
+  "reason": "agent-vault spike: canary detected and stored (fake). Key not sent to model."
+}

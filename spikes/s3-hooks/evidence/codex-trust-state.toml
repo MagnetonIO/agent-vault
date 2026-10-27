@@ -1,0 +1,10 @@
+[hooks.state]
+
+[hooks.state."<SANDBOX>/codex-home/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:<hash>"
+
+[hooks.state."<SANDBOX>/codex-home/hooks.json:user_prompt_submit:0:0"]
+trusted_hash = "sha256:<hash>"
+
+[hooks.state."<SANDBOX>/codex-home/hooks.json:stop:0:0"]
+trusted_hash = "sha256:<hash>"

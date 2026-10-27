@@ -1,0 +1,92 @@
+# mcp add syntax (--help only; nothing was added)
+
+## claude mcp add --help
+Usage: claude mcp add [options] <name> <commandOrUrl> [args...]
+
+Add an MCP server to Claude Code.
+
+Examples:
+  # Add HTTP server:
+  claude mcp add --transport http sentry https://mcp.sentry.dev/mcp
+
+  # Add HTTP server with headers:
+  claude mcp add --transport http corridor https://app.corridor.dev/api/mcp
+--header "Authorization: Bearer ..."
+
+  # Add stdio server with environment variables:
+  claude mcp add my-server -e API_KEY=xxx -- npx my-mcp-server
+
+  # Add stdio server with subprocess flags:
+  claude mcp add my-server -- my-command --some-flag arg1
+
+Options:
+  --callback-port <port>       Fixed port for OAuth callback (for servers
+                               requiring pre-registered redirect URIs)
+  --client-id <clientId>       OAuth client ID for HTTP/SSE servers
+  --client-secret              Prompt for OAuth client secret (or set
+                               MCP_CLIENT_SECRET env var)
+  -e, --env <env...>           Set environment variables (e.g. -e KEY=value)
+  -H, --header <header...>     Set headers for HTTP/SSE servers (e.g. -H
+                               "X-Api-Key: abc123" -H "X-Custom: value")
+  -h, --help                   Display help for command
+  -s, --scope <scope>          Configuration scope (local, user, or project)
+                               (default: "local")
+  -t, --transport <transport>  Transport type (stdio, sse, http). Defaults to
+                               stdio if not specified.
+
+## codex mcp add --help
+Usage: codex mcp add [OPTIONS] <NAME> (--url <URL> | -- <COMMAND>...)
+Arguments:
+  <NAME>
+          Name for the MCP server configuration
+  [COMMAND]...
+          Command to launch the MCP server. Use --url for a streamable HTTP server
+Options:
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+          Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed
+          as TOML. If it fails to parse as TOML, the raw string is used as a literal.
+          
+          Examples: - `-c model="o3"` - `-c 'sandbox_permissions=["disk-full-read-access"]'` - `-c
+          shell_environment_policy.inherit=all`
+      --env <KEY=VALUE>
+          Environment variables to set when launching the server. Only valid with stdio servers
+      --enable <FEATURE>
+          Enable a feature (repeatable). Equivalent to `-c features.<name>=true`
+      --url <URL>
+          URL for a streamable HTTP MCP server
+      --bearer-token-env-var <ENV_VAR>
+          Optional environment variable to read for a bearer token. Only valid with streamable HTTP
+          servers
+      --disable <FEATURE>
+          Disable a feature (repeatable). Equivalent to `-c features.<name>=false`
+      --oauth-client-id <CLIENT_ID>
+          Optional OAuth client identifier to use for this MCP server
+      --oauth-client-secret <CLIENT_SECRET>
+          Optional OAuth client secret for the pre-registered client
+      --oauth-client-registration <AUTO|CIMD|DCR>
+          OAuth client-registration strategy for the immediate login only
+          
+          [possible values: auto, cimd, dcr]
+      --oauth-resource <RESOURCE>
+          Optional OAuth resource parameter to include during MCP login
+  -h, --help
+          Print help (see a summary with '-h')
+
+## opencode mcp add --help
+DESCRIPTION
+  Add an MCP server to your configuration
+
+USAGE
+  opencode mcp add [flags] <name> [<command...>]
+
+ARGUMENTS
+  name string          Name of the MCP server
+  command... string    Command and arguments for a local server, passed after -- (optional)
+
+FLAGS
+  --url string          URL for a remote MCP server
+  --header key=value    HTTP header for a remote server, as name=value
+  --env key=value       Environment variable for a local server, as name=value
+  --global              Write to the global config instead of the project config
+

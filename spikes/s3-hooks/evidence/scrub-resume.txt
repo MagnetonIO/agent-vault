@@ -1,0 +1,9 @@
+# Step 5. Harness fully stopped; scrub = spikes/s3-hooks/scrub.mjs (temp file + rename, mode kept; sqlite files get a SAME-LENGTH replacement). Then resume; a local mock model records the request body.
+
+harness   | files scrubbed                                                   | after scrub: canary left | resume command                                  | result
+Claude    | projects/<proj>/<session>.jsonl (unblocked session)              | none                     | claude -p --resume <id>                         | OK, is_error=false; request body contains "[REDACTED:vault]", no canary
+Claude    | projects/<proj>/<session>.jsonl (blocked -p session)             | none                     | claude -p --resume <id>                         | OK; body has neither canary nor marker (queue-operation lines are not replayed to the model)
+Codex     | rollout jsonl + state_5.sqlite(+wal) + thread_history_1.sqlite(+wal) | none                 | codex exec resume <id>                          | OK; PRAGMA integrity_check = ok on both DBs; body has marker, no canary
+Codex     | control: appended a line of invalid JSON to the rollout          | -                        | codex exec resume <id>                          | still resumes (malformed lines tolerated) -> a successful resume does NOT prove the scrub kept the file valid; validate JSONL separately
+OpenCode  | opencode.db (same-length) + opencode.log                         | none                     | opencode run --standalone -s <ses_id>           | OK; PRAGMA integrity_check = ok; body has marker, no canary
+Limits: harness was stopped in every case. Scrubbing while a harness is running was NOT tested. Interactive (TUI) resume was NOT tested; only -p / exec / run.

@@ -124,13 +124,13 @@ Three paths, strongest first:
 | Path | How | Does the key touch the harness? | Status |
 |------|-----|---------------------------------|--------|
 | **A. Out-of-band (primary)** | `agent-vault grab <name>` reads the clipboard, stores the key, clears the clipboard, and prints `stored github/pat (ghp_, 40 chars)`. Inside a harness: `! agent-vault grab github/pat` (the command line holds no secret). Or MCP `vault_capture` → **URL-mode elicitation** → vaultd's one-time page `http://127.0.0.1:<port>/capture/<nonce>` | **No** | Buildable now |
-| **B. Prompt safety net** | `UserPromptSubmit` hook detects a key → stores it → **blocks** the prompt → tells the user the reference name | **Yes:** it reaches local disk but not the model | Claude Code ✅ · Codex ✅ · OpenCode ❌ (no documented prompt hook) |
+| **B. Prompt safety net** | `UserPromptSubmit` hook detects a key → stores it → **blocks** the prompt → tells the user the reference name | **Yes:** it reaches local disk but not the model | Claude Code ✅ · Codex ✅ · OpenCode ⚠️ (no block; `session.context` redacts what the model sees; the DB keeps the text). Measured in S3 |
 | **C. Files** | `agent-vault import .env` and `agent-vault migrate` move values into the vault and rewrite them to references | Already on disk → rewritten | Buildable now |
 
 **How Path B works (checked against harness docs 2026-10-26):**
 1. Block with `suppressOriginalPrompt: true`. **The key never reaches the model.**
 2. Store the key in the vault.
-3. Scrub `transcript_path` and prompt history on `Stop`/`SessionEnd`. The harness still writes the blocked text to local disk, and hooks can't rewrite prompts: Claude Code says "can't replace the prompt", and Codex doesn't document a rewrite. The Codex transcript format "isn't a stable interface", so the scrubber must tolerate format changes.
+3. Scrub what the harness left on disk (measured in S3, `docs/spikes/s3-harness-hooks.md`). Hooks can't rewrite prompts. Residue differs: Claude `-p` writes one `queue-operation` transcript line (**after** the hook returns, so scrub on `SessionEnd` and sweep at the next `SessionStart`; `Stop` doesn't fire after a block); Claude's TUI and `codex exec` leave nothing; Codex's TUI leaves a `history.jsonl` line unless `history.persistence = "none"`; OpenCode keeps the message in `opencode.db`. The Codex transcript format "isn't a stable interface", so the scrubber must tolerate format changes, be binary-safe (sqlite files need a same-length rewrite) and re-validate JSONL afterwards.
 4. Tag the secret `exposed-locally` and suggest rotation.
 5. **Route to 100% off-disk:** Path A today, plus an upstream prompt-rewrite hook in each harness (Open question 3).
 
@@ -150,13 +150,14 @@ Three paths, strongest first:
 
 | Concern | Claude Code | Codex | OpenCode | Any other |
 |---------|-------------|-------|----------|-----------|
-| Prompt capture (B) | `UserPromptSubmit`: block + `suppressOriginalPrompt` | `UserPromptSubmit` (`features.hooks`): block | **Gap:** no documented prompt hook; research `message.*` events or upstream | — |
-| Tool guard | `PreToolUse` (`updatedInput` can rewrite) | `PreToolUse` | `tool.execute.before` | — |
-| Harness's own model key | `apiKeyHelper` → `agent-vault helper anthropic` (verify it isn't exported to Bash env) | `model_providers.<id>.auth.command` | Phase 2 base-URL proxy; MVP `run -- opencode` (T1 only) | `run --` |
+| Prompt capture (B) | `UserPromptSubmit`: block + `suppressOriginalPrompt: true` (**required**; otherwise `Original prompt:` is written to the transcript). Measured: `-p` leaves 1 transcript line, TUI leaves nothing | `UserPromptSubmit` in `hooks.json`: `{"decision":"block"}`. Hooks are on by default, but **must be trusted** (`/hooks` → `t`, stored as `[hooks.state.*] trusted_hash`); an untrusted hook is skipped and the prompt goes to the model | No prompt hook in 2.x. `session.context` + `session.title` (v2 plugin, `export default {id, setup}`) can redact or reject the outbound turn; stored text stays in `opencode.db` | — |
+| Tool guard | `PreToolUse` (`updatedInput` can rewrite) | `PreToolUse` | `tool.execute.before` (docs name; in 2.1.4 the `tool.hook("execute.before")` name exists, not exercised) | — |
+| Harness's own model key | `apiKeyHelper` → `agent-vault helper anthropic`. **Measured: the helper output is not exported to Bash tool or hook env** (a key in `ANTHROPIC_API_KEY` is) | `model_providers.<id>.auth.command` | Phase 2 base-URL proxy; MVP `run -- opencode` (T1 only) | `run --` |
 | MCP server secrets | Wrap stdio servers: `command: agent-vault`, `args: [run, --bundle, x, --, <server>]` | Same; HTTP servers: `http_headers_helper` / `bearer_token_env_var` | Wrap local `command`; remote `headers` | Wrap |
-| Shell env hygiene | Never put raw keys in harness env | `shell_environment_policy` | `shell.env` plugin: inject proxy env + session token only | — |
+| Shell env hygiene | Never put raw keys in harness env (`ANTHROPIC_API_KEY` reaches Bash and hooks) | `shell_environment_policy` | `shell.env` is **not in 2.1.4**; v2 `shell.hook` name unverified. Inject via `run --` for now | — |
+| CLI to add an MCP server (S3, `--help` only) | `claude mcp add [-s user] [-t stdio\|sse\|http] [-e K=V] [-H "K: V"] <name> <cmdOrUrl> [args]` | `codex mcp add <name> (--url U [--bearer-token-env-var V] \| [--env K=V] -- <cmd>...)` | `opencode mcp add [--url U] [--header k=v] [--env k=v] [--global] <name> [-- <cmd>...]` | — |
 | Proxy mode (phase 2) | `HTTPS_PROXY` + `NODE_EXTRA_CA_CERTS` | same | same | same |
-| History scrub | `~/.claude/history.jsonl` + transcript | `history.persistence = "none"` option; `~/.codex/sessions` | `~/.local/share/opencode` (verify) | — |
+| History scrub | transcript `projects/<proj>/<session>.jsonl` (`queue-operation.content`); `history.jsonl` is TUI-only and held nothing for a blocked prompt. Resume after scrub: OK | `history.persistence = "none"` removes the TUI residue entirely; otherwise `history.jsonl`, rollout, `state_5.sqlite`, `thread_history_1.sqlite` (+`-wal`). Resume after scrub: OK | `~/.local/share/opencode/opencode.db` (`session_message.data`) + `log/opencode.log` (argv). Resume after scrub: OK | — |
 
 ---
 

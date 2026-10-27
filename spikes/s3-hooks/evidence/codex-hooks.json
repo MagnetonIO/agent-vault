@@ -1,0 +1,13 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "node <REPO>/spikes/s3-hooks/codex-hook.mjs" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "node <REPO>/spikes/s3-hooks/codex-hook.mjs" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "node <REPO>/spikes/s3-hooks/codex-hook.mjs" }] }
+    ]
+  }
+}

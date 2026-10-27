@@ -1,0 +1,18 @@
+# before/after (mtime epoch, size). Only stat was used; file contents were never read.
+## before (start of spike)
+/Users/mlong/.claude/settings.json 1793065416 9148
+/Users/mlong/.claude.json 1793069093 512057
+/Users/mlong/.codex/config.toml 1793034946 138011
+/Users/mlong/.codex/history.jsonl 1793066678 2873506
+## after (end of spike, sandbox deleted)
+/Users/mlong/.claude/settings.json 1793065416 9148
+/Users/mlong/.claude.json 1793070326 512412
+/Users/mlong/.codex/config.toml 1793069810 138011
+/Users/mlong/.codex/history.jsonl 1793066678 2873506
+## result
+UNCHANGED: ~/.claude/settings.json, ~/.codex/history.jsonl (mtime and size equal).
+CHANGED:   ~/.claude.json (size +355, mtime moves on every check) and ~/.codex/config.toml (mtime only, size equal).
+Attribution (circumstantial; contents were not and may not be read, so a content diff is not possible):
+- ~/.codex/config.toml mtime = 21:56:50 local. `ps` shows the ChatGPT desktop app's Codex processes starting 21:56:40-21:56:51 (incl. `codex -c forced_login_method=... exec-server` at 21:56:51). None of my runs started then; every sandboxed Codex run used CODEX_HOME=<tmp> and HOME=<tmp> under env -i.
+- ~/.claude.json is rewritten continuously by any live real Claude Code / Claude.app session (this spike runs inside one; Claude.app helpers also restarted 21:56:43). My Claude runs used CLAUDE_CONFIG_DIR=<tmp>, and the sandbox dir received its own .claude.json each time.
+Not proven either way from my side.
