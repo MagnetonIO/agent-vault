@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { createRedactor, secretForms } from "../src/index.js";
-import { ALNUM, fakes } from "./fixtures/fake-keys.js";
+import { ALNUM, body, fakes } from "./fixtures/fake-keys.js";
 
 const run = (secrets: { name: string; value: string }[], chunks: string[]): string => {
   const r = createRedactor(secrets);
@@ -424,6 +424,190 @@ describe("redactor", () => {
       expect(forms).toContain('pa"ss\\word123');
       expect(forms).toContain('pa\\"ss\\\\word123');
       expect(secretForms("ab")).toEqual(["ab"]);
+    });
+  });
+});
+
+describe("base64 of a secret at any byte offset", () => {
+  const KEY = `sk-${body(ALNUM, 37, 7)}`;
+  const s = [{ name: "k", value: KEY }];
+  const MARK = "[redacted vault://k]";
+  const ENCODINGS = ["base64", "base64url"] as const;
+
+  const encode = (encoding: (typeof ENCODINGS)[number], prefix: Buffer, suffix = Buffer.alloc(0)) =>
+    Buffer.concat([prefix, Buffer.from(KEY), suffix]).toString(encoding);
+  const filler = (n: number, seed: number) => Buffer.from(body(ALNUM, n, seed));
+
+  /** The chars of `base64(k filler bytes + KEY + more)` that hold bits of the key alone. */
+  const keyOnly = (encoding: (typeof ENCODINGS)[number], k: number) => {
+    const first = Math.ceil((8 * k) / 6);
+    const end = Math.floor((8 * (k + KEY.length)) / 6);
+    return encode(encoding, Buffer.alloc(k), Buffer.alloc(2)).slice(first, end);
+  };
+
+  /** Every 8-char window of every key-only form that is still in `text`. */
+  const leaked = (text: string) =>
+    ENCODINGS.flatMap((encoding) =>
+      [0, 1, 2].flatMap((k) => {
+        const form = keyOnly(encoding, k);
+        return Array.from({ length: form.length - 7 }, (_, i) => form.slice(i, i + 8)).filter((w) =>
+          text.includes(w),
+        );
+      }),
+    );
+
+  test("the key-only chars do not depend on the filler (any bytes before and after)", () => {
+    const fillers = [
+      Buffer.from([0x00, 0x00]),
+      Buffer.from([0xff, 0xff]),
+      Buffer.from([0x55, 0xaa]),
+      Buffer.from([0xfb, 0x07]),
+      ...Array.from({ length: 20 }, (_, i) => Buffer.from(body(ALNUM, 2, i))),
+    ];
+    for (const encoding of ENCODINGS) {
+      for (const k of [0, 1, 2]) {
+        const expected = keyOnly(encoding, k);
+        expect(expected.length).toBeGreaterThanOrEqual(12);
+        expect(secretForms(KEY)).toContain(expected);
+        for (const before of fillers) {
+          for (const after of fillers) {
+            const lead = Buffer.concat([before, before]).subarray(0, k);
+            expect(encode(encoding, lead, after), `${encoding} k=${k}`).toContain(expected);
+          }
+        }
+      }
+    }
+  });
+
+  test.each(ENCODINGS.flatMap((e) => [1, 2].map((k) => [e, k] as const)))(
+    "%s with %i filler byte(s) before the key",
+    (encoding, k) => {
+      const blob = encode(encoding, filler(k, 3));
+      expect(blob).not.toContain(Buffer.from(KEY).toString(encoding));
+      const out = run(s, [`out: ${blob}\n`]);
+      expect(out).toMatch(/^out: .{0,4}\[redacted vault:\/\/k\].{0,4}\n$/);
+      expect(leaked(out)).toEqual([]);
+    },
+  );
+
+  test("curl -v -u user:KEY prints Authorization: Basic base64(user:KEY)", () => {
+    const header = `> Authorization: Basic ${Buffer.from(`user:${KEY}`).toString("base64")}`;
+    const out = run(s, [`> GET / HTTP/1.1\n${header}\n> Accept: */*\n`]);
+    expect(out).toContain("> GET / HTTP/1.1\n> Authorization: Basic ");
+    expect(out).toContain(MARK);
+    expect(out.endsWith("\n> Accept: */*\n")).toBe(true);
+    expect(leaked(out)).toEqual([]);
+  });
+
+  test("a key in the middle of a larger base64 blob, at every offset 0-2", () => {
+    for (const encoding of ENCODINGS) {
+      for (let k = 0; k < 3; k++) {
+        const blob = encode(encoding, Buffer.concat([filler(30, 1), filler(k, 2)]), filler(25, 4));
+        const out = run(s, [`data=${blob};`]);
+        expect(out, `${encoding} k=${k}`).toContain(MARK);
+        expect(leaked(out), `${encoding} k=${k}`).toEqual([]);
+      }
+    }
+  });
+
+  test("a chunk split at every index", () => {
+    const text = `Authorization: Basic ${Buffer.from(`user:${KEY}`).toString("base64")}\nnext`;
+    const whole = run(s, [text]);
+    expect(whole).toContain(MARK);
+    for (let i = 1; i < text.length; i++) {
+      expect(run(s, [text.slice(0, i), text.slice(i)]), `split ${i}`).toBe(whole);
+    }
+    const r = createRedactor(s);
+    expect([...text].map((c) => r.push(c)).join("") + r.flush()).toBe(whole);
+  });
+
+  test("property: 200 random prefixes and suffixes are redacted and leave no key-only run", () => {
+    let seed = 99;
+    const rand = (n: number) => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return (seed >>> 8) % n;
+    };
+    for (let round = 0; round < 200; round++) {
+      const prefix = Buffer.from(Array.from({ length: rand(21) }, () => rand(256)));
+      const suffix = Buffer.from(Array.from({ length: rand(21) }, () => rand(256)));
+      const encoding = ENCODINGS[round % 2] as (typeof ENCODINGS)[number];
+      const blob = encode(encoding, prefix, suffix);
+      const out = run(s, [blob]);
+      expect(out, `round ${round}: ${prefix.length}+KEY+${suffix.length}`).toContain(MARK);
+      expect(leaked(out), `round ${round}`).toEqual([]);
+    }
+  });
+
+  describe("wrapped across lines", () => {
+    const wrapAt = (text: string, columns: number, lineBreak: string) =>
+      (text.match(new RegExp(`.{1,${columns}}`, "g")) as string[]).join(lineBreak);
+
+    test.each(
+      [0, 1, 2].flatMap((k) =>
+        [64, 76].flatMap((columns) =>
+          ["\n", "\r\n"].map((lineBreak) => [k, columns, lineBreak] as const),
+        ),
+      ),
+    )("prefix of %i bytes, %i columns, %j", (k, columns, lineBreak) => {
+      // The prefix puts the line break at a different place in the key for each case.
+      const blob = wrapAt(encode("base64", Buffer.concat([filler(40 + k, 5)])), columns, lineBreak);
+      const out = run(s, [`${blob}\n`]);
+      expect(out).toContain(MARK);
+      expect(out.endsWith("\n")).toBe(true);
+      expect(leaked(out.replace(/\r?\n/g, ""))).toEqual([]);
+      const step = columns === 64 ? 11 : 13;
+      for (let i = 1; i < blob.length; i += step) {
+        expect(run(s, [blob.slice(0, i), `${blob.slice(i)}\n`]), `split ${i}`).toBe(out);
+      }
+    });
+
+    test("held text stays bounded when line breaks sit between the chars", () => {
+      const longest = Math.max(...secretForms(KEY).map((f) => f.length));
+      const r = createRedactor(s);
+      const text = "x".repeat(50) + wrapAt(encode("base64", filler(2, 6)), 4, "\r\n");
+      let out = "";
+      let maxHeld = 0;
+      for (const c of text) {
+        out += r.push(c);
+        maxHeld = Math.max(maxHeld, r.heldLength());
+      }
+      expect(maxHeld).toBeLessThanOrEqual(3 * longest + 2);
+      expect(out + r.flush()).toMatch(/^x{50}[A-Za-z0-9+/\r\n]{0,6}\[redacted vault:\/\/k\]$/);
+    });
+
+    test("a lone CR at the end of a push is held in case the LF follows", () => {
+      const blob = encode("base64", filler(1, 8));
+      const cut = 20;
+      const text = `${blob.slice(0, cut)}\r\n${blob.slice(cut)}`;
+      const r = createRedactor(s);
+      const out = r.push(`${blob.slice(0, cut)}\r`) + r.push(`\n${blob.slice(cut)}`) + r.flush();
+      expect(out).toBe(run(s, [text]));
+      expect(out).toContain(MARK);
+    });
+  });
+
+  describe("no false positives", () => {
+    test("ordinary text is returned unchanged", () => {
+      const text = "The quick brown fox\r\njumps over the lazy dog 0123456789\n".repeat(50);
+      expect(run(s, [text])).toBe(text);
+    });
+
+    test("an unrelated base64 blob is returned unchanged", () => {
+      const blob = Buffer.from(body(ALNUM, 300, 11)).toString("base64");
+      expect(run(s, [blob, "\n", blob])).toBe(`${blob}\n${blob}`);
+    });
+
+    test("a secret too short for a 12-char offset form gets none", () => {
+      const forms = secretForms("ninebyte!");
+      const base = Buffer.from("ninebyte!");
+      expect(forms).toContain(base.toString("base64"));
+      for (const k of [1, 2]) {
+        const mid = Buffer.concat([Buffer.alloc(k), base, Buffer.alloc(2)])
+          .toString("base64")
+          .slice(Math.ceil((8 * k) / 6), Math.floor((8 * (k + base.length)) / 6));
+        expect(mid.length).toBeLessThan(12);
+        expect(forms).not.toContain(mid);
+      }
     });
   });
 });

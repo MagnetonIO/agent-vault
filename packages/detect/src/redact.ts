@@ -1,7 +1,7 @@
 export type Redactor = {
   push(chunk: string): string;
   flush(): string;
-  /** How many chars are held back right now; at most about twice the longest variant. */
+  /** How many chars are held back right now; at most about twice the longest variant (three times for base64, which may hold line breaks). */
   heldLength(): number;
   /** How many redactions have been emitted so far (a merged run of matches counts once). */
   matchCount(): number;
@@ -31,25 +31,58 @@ const wrap = (text: string, columns: number, lineBreak: string): string => {
   return lines.join(lineBreak);
 };
 
+/** Fewest chars of base64 that depend on the key alone for an offset variant to be worth using. */
+const MIN_OFFSET_CHARS = 12;
+const BASE64_ENCODINGS = ["base64", "base64url"] as const;
+
 /**
- * Every form one secret is likely to be printed in: raw; standard base64, also wrapped at 64 and
- * 76 columns with LF or CRLF; base64url (no padding); URI-component with upper- and lowercase
- * `%xx`; and the inside of a JSON string literal (what `JSON.stringify` prints for a value with
- * quotes, backslashes or control characters). Any form that contains a control character (the
- * wrapped base64 ones) is also listed in that escaped form, since that is how a JSON transcript
- * stores a multi-line copy.
+ * The base64 and base64url texts a secret leaves in a larger encoded buffer. The encoding of a
+ * byte string depends on where it starts: `k` = 0, 1 or 2 bytes after a 3-byte boundary shifts every
+ * 6-bit group. For each of those offsets the characters made of key bits only are kept: not
+ * the leading ones that also hold bits of the `k` bytes before it, nor the trailing ones that also
+ * hold bits of the bytes after it. That is a substring of every encoding of a buffer that holds
+ * the key at that alignment, whatever else is in the buffer. Where the key is the end of the data,
+ * the last partial character and the padding are key-only too, so that form is kept as well.
+ * A form with under MIN_OFFSET_CHARS key-only chars is dropped; it would hit ordinary text.
  */
-function variantsOf(value: string): string[] {
+function base64OffsetForms(bytes: Buffer): string[] {
+  const forms: string[] = [];
+  for (const encoding of BASE64_ENCODINGS) {
+    for (let k = 0; k < 3; k++) {
+      const first = Math.ceil((8 * k) / 6);
+      const end = Math.floor((8 * (k + bytes.length)) / 6);
+      if (end - first < MIN_OFFSET_CHARS) continue;
+      const lead = Buffer.alloc(k);
+      // Zero filler: the chars kept never depend on it, which the tests check with other fillers.
+      const inside = Buffer.concat([lead, bytes, Buffer.alloc(2)]).toString(encoding);
+      forms.push(inside.slice(first, end));
+      forms.push(Buffer.concat([lead, bytes]).toString(encoding).slice(first));
+    }
+  }
+  return forms;
+}
+
+/**
+ * Every form one secret is likely to be printed in. `plain` forms are matched as they are: raw;
+ * URI-component with upper- and lowercase `%xx`; and the inside of a JSON string literal (what
+ * `JSON.stringify` prints for a value with quotes, backslashes or control characters); also
+ * standard base64 wrapped at 64 and 76 columns with LF or CRLF. Any form that contains a control
+ * character (the wrapped base64 ones) is also listed in that escaped form, since that is how a
+ * JSON transcript stores a multi-line copy.
+ *
+ * `base64` forms are standard base64 and base64url (no padding), and the same for the secret
+ * starting 1 or 2 bytes into a 3-byte group (see `base64OffsetForms`). They are matched ignoring
+ * line breaks, so they also cover a wrap at any column, whatever sits in front of the secret.
+ */
+function variantsOf(value: string): { plain: string[]; base64: string[] } {
   // A short value still shows up escaped when it holds a quote, a backslash or a control char.
   if (value.length < MIN_ENCODED_LENGTH)
-    return [...new Set([value, JSON.stringify(value).slice(1, -1)])];
+    return { plain: [...new Set([value, JSON.stringify(value).slice(1, -1)])], base64: [] };
   const bytes = Buffer.from(value, "utf8");
   const base64 = bytes.toString("base64");
   const urlencoded = encodeURIComponent(value);
   const forms = [
     value,
-    base64,
-    bytes.toString("base64url"),
     urlencoded,
     urlencoded.replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase()),
     JSON.stringify(value).slice(1, -1),
@@ -60,11 +93,52 @@ function variantsOf(value: string): string[] {
   const escaped = forms
     .filter((form) => /\p{Cc}/u.test(form))
     .map((form) => JSON.stringify(form).slice(1, -1));
-  return [...new Set([...forms, ...escaped])];
+  return {
+    plain: [...new Set([...forms, ...escaped])],
+    base64: [...new Set([base64, bytes.toString("base64url"), ...base64OffsetForms(bytes)])],
+  };
 }
 
 /** Every text `value` is redacted in (see `variantsOf`). The scrubber uses them to pre-screen text. */
-export const secretForms = variantsOf;
+export const secretForms = (value: string): string[] => {
+  const { plain, base64 } = variantsOf(value);
+  return [...plain, ...base64];
+};
+
+/** `text` with its line breaks (`\r?\n`) taken out, and how to find a char's place in the original. */
+type Stripped = { text: string; at: (index: number) => number };
+
+/** With `dropTrailingCr`, a `\r` that ends the text goes too: it may be half of a `\r\n`. */
+function stripBreaks(text: string, dropTrailingCr = false): Stripped {
+  const segStart: number[] = [0];
+  const segOffset: number[] = [0];
+  const parts: string[] = [];
+  let last = 0;
+  let length = 0;
+  for (const m of text.matchAll(dropTrailingCr ? /\r?\n|\r$/g : /\r?\n/g)) {
+    const index = m.index as number;
+    parts.push(text.slice(last, index));
+    length += index - last;
+    last = index + m[0].length;
+    segStart.push(last);
+    segOffset.push(length);
+  }
+  if (last === 0) return { text, at: (index) => index };
+  parts.push(text.slice(last));
+  return {
+    text: parts.join(""),
+    at(index) {
+      let lo = 0;
+      let hi = segOffset.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if ((segOffset[mid] as number) <= index) lo = mid;
+        else hi = mid - 1;
+      }
+      return (segStart[lo] as number) + index - (segOffset[lo] as number);
+    },
+  };
+}
 
 const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
 
@@ -89,32 +163,60 @@ export function createRedactor(
   const marker = opts.marker ?? defaultMarker;
   let emitted = 0;
   const variants = new Map<string, string>();
+  const base64Variants = new Map<string, string>();
   for (const s of secrets) {
     if (s.value.length < MIN_SECRET_LENGTH) {
       throw new RangeError(
         `secret "${s.name}" is shorter than ${MIN_SECRET_LENGTH} characters and cannot be redacted safely`,
       );
     }
-    for (const text of variantsOf(s.value)) {
-      if (!variants.has(text)) variants.set(text, s.name);
-    }
+    const forms = variantsOf(s.value);
+    for (const text of forms.plain) if (!variants.has(text)) variants.set(text, s.name);
+    for (const text of forms.base64)
+      if (!base64Variants.has(text)) base64Variants.set(text, s.name);
   }
   const texts = [...variants.keys()];
   const firstChars = new Set(texts.map((t) => t[0]));
-  const longest = Math.max(1, ...texts.map((t) => t.length));
+  const base64Texts = [...base64Variants.keys()];
+  const base64FirstChars = new Set(base64Texts.map((t) => t[0]));
+  const base64Longest = Math.max(1, ...base64Texts.map((t) => t.length));
+  /** A held base64 prefix has at most a `\r\n` after each char, and maybe a lone `\r` at the end. */
+  const base64Window = 3 * base64Longest + 2;
+  const plainLongest = Math.max(1, ...texts.map((t) => t.length));
+  const longest = Math.max(plainLongest, base64Longest);
   let held = "";
   /** How many chars at the start of `held` were already redacted (see `drain`). */
   let covered = 0;
 
-  /** Length of the longest suffix of `buf` that is a proper prefix of some variant. */
-  function heldSuffixLength(buf: string): number {
-    for (let i = Math.max(0, buf.length - (longest - 1)); i < buf.length; i++) {
+  /** Length of the longest suffix of `buf` that is a proper prefix of some plain variant. */
+  function plainHeldLength(buf: string): number {
+    for (let i = Math.max(0, buf.length - (plainLongest - 1)); i < buf.length; i++) {
       if (!firstChars.has(buf[i])) continue;
       const tail = buf.slice(i);
       if (texts.some((t) => t.length > tail.length && t.startsWith(tail))) return tail.length;
     }
     return 0;
   }
+
+  /**
+   * Length of the longest suffix of `buf` that is, with its line breaks taken out, a proper prefix
+   * of some base64 variant. Line breaks inside it are held too, so this can reach 3 chars per char.
+   */
+  function base64HeldLength(buf: string): number {
+    const base = Math.max(0, buf.length - base64Window);
+    const { text, at } = stripBreaks(buf.slice(base), true);
+    for (let i = Math.max(0, text.length - (base64Longest - 1)); i < text.length; i++) {
+      if (!base64FirstChars.has(text[i])) continue;
+      const tail = text.slice(i);
+      if (base64Texts.some((t) => t.length > tail.length && t.startsWith(tail))) {
+        return buf.length - (base + at(i));
+      }
+    }
+    return 0;
+  }
+
+  const heldSuffixLength = (buf: string): number =>
+    Math.max(plainHeldLength(buf), base64HeldLength(buf));
 
   /**
    * Every complete match in `buf`, sorted by start. Matches that end inside the first `covered`
@@ -125,6 +227,14 @@ export function createRedactor(
     for (const [text, name] of variants) {
       for (let i = buf.indexOf(text); i !== -1; i = buf.indexOf(text, i + 1)) {
         if (i + text.length > covered) found.push({ start: i, end: i + text.length, name });
+      }
+    }
+    // Base64 is matched with its line breaks taken out, so a wrapped copy matches at any column.
+    const { text: flat, at } = stripBreaks(buf);
+    for (const [text, name] of base64Variants) {
+      for (let i = flat.indexOf(text); i !== -1; i = flat.indexOf(text, i + 1)) {
+        const end = at(i + text.length - 1) + 1;
+        if (end > covered) found.push({ start: at(i), end, name });
       }
     }
     return found.sort((a, b) => a.start - b.start || b.end - a.end);
