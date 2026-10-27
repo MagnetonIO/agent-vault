@@ -1,0 +1,785 @@
+---
+lockfileVersion: "9.0"
+
+importers:
+  .:
+    configDependencies: {}
+    packageManagerDependencies:
+      pnpm:
+        specifier: 12.14.0
+        version: 12.14.0
+
+packages:
+  "@pnpm/exe.android-arm64@12.14.0":
+    resolution:
+      {
+        integrity: sha512-+iSh7x21C3A2hqc+Z0ZmbKTcn6YNlzrXM142PsnQH/dLj0DYxFzoBvc6XAnL/yfQ5nnH2ebBiRj/zVxr61fZbQ==,
+      }
+    cpu: [arm64]
+    os: [android]
+
+  "@pnpm/exe.android-x64@12.14.0":
+    resolution:
+      {
+        integrity: sha512-qT+0LqEr2wBVaxcG2T8cX/R8SSRz2Rvpp8nRR4fh8tnGUZRch87gFmsHUAoSQh7w6j1h0qTjrA384j4xi8frvw==,
+      }
+    cpu: [x64]
+    os: [android]
+
+  "@pnpm/exe.darwin-arm64@12.14.0":
+    resolution:
+      {
+        integrity: sha512-tnrdUB8ecJoehuKKqi1YHCBVl61xtJ9XVGcx5EviC6fWO4DeGI8GtXrjvJxDBM3nuVjJeWistgsUp/N142x4sw==,
+      }
+    cpu: [arm64]
+    os: [darwin]
+
+  "@pnpm/exe.darwin-x64@12.14.0":
+    resolution:
+      {
+        integrity: sha512-vlBfGkruqQRsEHTW43cPwpYd7QlbIJ//cvpAdb3bVXkI8SgTPoXhCnc05m+ZNiPrrEkBsX/t7KHw9aXpkzPm3Q==,
+      }
+    cpu: [x64]
+    os: [darwin]
+
+  "@pnpm/exe.freebsd-x64@12.14.0":
+    resolution:
+      {
+        integrity: sha512-Qg5rxBrGYl6Tfso+EyygPf84fY1Fzy55E/0or+iuYKtnf0vc0MlHJfVIlT7pBukMRntQHRik7hUi0Z4s7AlJsw==,
+      }
+    cpu: [x64]
+    os: [freebsd]
+
+  "@pnpm/exe.linux-arm64-musl@12.14.0":
+    resolution:
+      {
+        integrity: sha512-DRIe4yQkXBGA/PhVJdzlbnllxBdAtnMMvTVLLcGpsK5FvJz9kxD2Hyxtn68ovmNkVX06f6p45cQwfm3wx2jn1A==,
+      }
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  "@pnpm/exe.linux-arm64@12.14.0":
+    resolution:
+      {
+        integrity: sha512-7joGShZ44Nk3WpNU+60JoOPjCXlgxhJAq11S2UiVtwCUDgTer1yTPPfxGW8pxaD6046actYLIYDbZNlubHWs0A==,
+      }
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  "@pnpm/exe.linux-ppc64@12.14.0":
+    resolution:
+      {
+        integrity: sha512-gSoryn7ySdXd//gjgf3MvvA8ZerJayaSbuMZMtAWq4vb2/wlVEgpl0Kvqt54y58TRj533Qjq2txKgnxd4JyoAQ==,
+      }
+    cpu: [ppc64]
+    os: [linux]
+    libc: [glibc]
+
+  "@pnpm/exe.linux-riscv64@12.14.0":
+    resolution:
+      {
+        integrity: sha512-EMjew1H9WqQ7pL+tYqCPwiuB+0PeCiJRV7fyWeuFw0wwYUajFBjcaPO3IGAVu9sdmJDU+e+HYv/Zey6aKae0Vw==,
+      }
+    cpu: [riscv64]
+    os: [linux]
+    libc: [glibc]
+
+  "@pnpm/exe.linux-s390x@12.14.0":
+    resolution:
+      {
+        integrity: sha512-shYOj/SFoXD35fHe0pWr2JofwSXulC0BnEIXLj2QokDi0EF//AfKsui35yKIkTEl+s2VJybc3PO4iJNhKIj5Qw==,
+      }
+    cpu: [s390x]
+    os: [linux]
+    libc: [glibc]
+
+  "@pnpm/exe.linux-x64-musl@12.14.0":
+    resolution:
+      {
+        integrity: sha512-btZiZ2Ot0llKK1ndSfA5i3IRX7/S0VrmzseNH/BJ4c+Cady+S81H6vvU1zByggHMyqQhC8OgxO5PiIY7D9bH0Q==,
+      }
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  "@pnpm/exe.linux-x64@12.14.0":
+    resolution:
+      {
+        integrity: sha512-F6K8e/jWxiuEYJaQtRRUG9ynBSTEHa+t7Lf86MKuOO5UA7WVVMbi+oB8nY6iKW++ncWS2yG6T9faXZGxqNsfoQ==,
+      }
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  "@pnpm/exe.win32-arm64@12.14.0":
+    resolution:
+      {
+        integrity: sha512-DOjlkVB6TtTKeAAe0hNZXn5S7YqESmo1Z6SGbR4BZNQ4isRg31XVHjX2RFTbY8gnZq68IwzyLmPqlEjMmYxofg==,
+      }
+    cpu: [arm64]
+    os: [win32]
+
+  "@pnpm/exe.win32-x64@12.14.0":
+    resolution:
+      {
+        integrity: sha512-/LSX6mew/sLf08XqcjemuklNKf1K/Ftpgj4//hK/HKzI2dKbmxDB27a/2OaQ5a0O3/3OFzlssXDziZsi+yVBwQ==,
+      }
+    cpu: [x64]
+    os: [win32]
+
+  pnpm@12.14.0:
+    resolution:
+      {
+        integrity: sha512-wYum2HmT09Fky16JSPMrLAbuhUSH4GzY2GeBNC+z5btGNDZwNHEehoArqpw3vqkGzhkprQjXCITJfYAd8TOJpg==,
+      }
+    engines: { node: ">=18.*" }
+    hasBin: true
+
+snapshots:
+  "@pnpm/exe.android-arm64@12.14.0":
+    optional: true
+
+  "@pnpm/exe.android-x64@12.14.0":
+    optional: true
+
+  "@pnpm/exe.darwin-arm64@12.14.0":
+    optional: true
+
+  "@pnpm/exe.darwin-x64@12.14.0":
+    optional: true
+
+  "@pnpm/exe.freebsd-x64@12.14.0":
+    optional: true
+
+  "@pnpm/exe.linux-arm64-musl@12.14.0":
+    optional: true
+
+  "@pnpm/exe.linux-arm64@12.14.0":
+    optional: true
+
+  "@pnpm/exe.linux-ppc64@12.14.0":
+    optional: true
+
+  "@pnpm/exe.linux-riscv64@12.14.0":
+    optional: true
+
+  "@pnpm/exe.linux-s390x@12.14.0":
+    optional: true
+
+  "@pnpm/exe.linux-x64-musl@12.14.0":
+    optional: true
+
+  "@pnpm/exe.linux-x64@12.14.0":
+    optional: true
+
+  "@pnpm/exe.win32-arm64@12.14.0":
+    optional: true
+
+  "@pnpm/exe.win32-x64@12.14.0":
+    optional: true
+
+  pnpm@12.14.0:
+    optionalDependencies:
+      "@pnpm/exe.android-arm64": 12.14.0
+      "@pnpm/exe.android-x64": 12.14.0
+      "@pnpm/exe.darwin-arm64": 12.14.0
+      "@pnpm/exe.darwin-x64": 12.14.0
+      "@pnpm/exe.freebsd-x64": 12.14.0
+      "@pnpm/exe.linux-arm64": 12.14.0
+      "@pnpm/exe.linux-arm64-musl": 12.14.0
+      "@pnpm/exe.linux-ppc64": 12.14.0
+      "@pnpm/exe.linux-riscv64": 12.14.0
+      "@pnpm/exe.linux-s390x": 12.14.0
+      "@pnpm/exe.linux-x64": 12.14.0
+      "@pnpm/exe.linux-x64-musl": 12.14.0
+      "@pnpm/exe.win32-arm64": 12.14.0
+      "@pnpm/exe.win32-x64": 12.14.0
+
+---
+lockfileVersion: "9.0"
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+  .:
+    dependencies:
+      "@napi-rs/keyring":
+        specifier: 2.1.2
+        version: 2.1.2
+      better-sqlite3:
+        specifier: 13.0.3
+        version: 13.0.3
+    devDependencies:
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+      postject:
+        specifier: 1.0.0-alpha.6
+        version: 1.0.0-alpha.6
+
+packages:
+  "@esbuild/aix-ppc64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-XExcO+dvLKvVtNTibSTBej1NCAbaGhWn9Ww1ZPx80qsahhPFe/8jgWP0IchNe0F3HwkU7n8ejhH8bjonqht8mQ==,
+      }
+    engines: { node: ">=18" }
+    cpu: [ppc64]
+    os: [aix]
+
+  "@esbuild/android-arm64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-5YfKeeI8qWfBZIX+u2xZC3Zlb3Os/gLS2sbEKM+I4ZOcsWmHS2WLysCcQZDAFRslDUU5Oiq44gf6PYN1vGwG5A==,
+      }
+    engines: { node: ">=18" }
+    cpu: [arm64]
+    os: [android]
+
+  "@esbuild/android-arm@0.28.2":
+    resolution:
+      {
+        integrity: sha512-kXXoiPVVGQcnIYGOeaovwOURpniDBpSq4A03qkQ+BMQqtGG6HYap3xne9C1O1yo4TR3qxlCX5IqqmX6fFo2Lqg==,
+      }
+    engines: { node: ">=18" }
+    cpu: [arm]
+    os: [android]
+
+  "@esbuild/android-x64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-O387ite7SzUyCcy3JQX4P4bLtEA7bLLkx+esve5JHnyYfNTxcVpXZo9jhdB0lTKN44gztELTdU7nS8Nr16Fs1Q==,
+      }
+    engines: { node: ">=18" }
+    cpu: [x64]
+    os: [android]
+
+  "@esbuild/darwin-arm64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-n4KqkOQrraxHJcgjM1RvwbigfQKIKJVpM7xp+KsxiyUSrRdIXnt73VhrPAx0fV44hgfmIVKjxMN9J1t5jySVkw==,
+      }
+    engines: { node: ">=18" }
+    cpu: [arm64]
+    os: [darwin]
+
+  "@esbuild/darwin-x64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-uq6suIWYP37qzGddBKPw5QEQPi6HiLGsO7UmkpfyaYNQ3D+rN6w6WfwH+nuqcGXWvawGwxOEroO4YGnFh95azw==,
+      }
+    engines: { node: ">=18" }
+    cpu: [x64]
+    os: [darwin]
+
+  "@esbuild/freebsd-arm64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-n+I0BTSRIoy+d6RPKnEVwql5UwBJolytvY4mAOIEJorKlqgPII8ix6slVVrfZ5Tnj7glIZvloylbB/EJPMWEXw==,
+      }
+    engines: { node: ">=18" }
+    cpu: [arm64]
+    os: [freebsd]
+
+  "@esbuild/freebsd-x64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-78XJTJkvPs0kz2w61301PJjXl4g7q3JqiYMZ/M/yVI73EHBrCRTgkhu9oqG7vPqq+a/yadEW8aD+agKlk5xrmg==,
+      }
+    engines: { node: ">=18" }
+    cpu: [x64]
+    os: [freebsd]
+
+  "@esbuild/linux-arm64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-pW4AC0P3it8c7do9MVM4p51FzHzdM/TZrerurgRcHJ2WTa1VQ1CIq18xncfpBJw4ojkiZZrKW2yIBWBP92j6Ug==,
+      }
+    engines: { node: ">=18" }
+    cpu: [arm64]
+    os: [linux]
+
+  "@esbuild/linux-arm@0.28.2":
+    resolution:
+      {
+        integrity: sha512-XlDnu2q5yoqems+xay6wSAcg9DDD7K9RLKZEBOMZm3ckNpJBvOX20tSfby8KfrrhINDyv9V2YVZKY/SpoGJI8w==,
+      }
+    engines: { node: ">=18" }
+    cpu: [arm]
+    os: [linux]
+
+  "@esbuild/linux-ia32@0.28.2":
+    resolution:
+      {
+        integrity: sha512-CYbnj78HsIeA+DhgUKgFCfvNsTHFhMMrinUrMZpDXJXKN8T3XViTZ/+wtHeVxEWY8ewSzTFN+nRmSwO2tZaLUQ==,
+      }
+    engines: { node: ">=18" }
+    cpu: [ia32]
+    os: [linux]
+
+  "@esbuild/linux-loong64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-buwkd8nsph4R+ajRvw0qM5Hja/TXQow3ptzWO2EbG/cqcIkHloRrdlBtQlshyYGTNFvfkfJ5tpPLVkY4DtsPfQ==,
+      }
+    engines: { node: ">=18" }
+    cpu: [loong64]
+    os: [linux]
+
+  "@esbuild/linux-mips64el@0.28.2":
+    resolution:
+      {
+        integrity: sha512-ZVykbDyk7519VwiNb9Lcj9m8XM6v5V9uKPvrEMkkEedVewf+0itkhahp4HDpgERXhwLRpWFypsGbG/J8s0QjJA==,
+      }
+    engines: { node: ">=18" }
+    cpu: [mips64el]
+    os: [linux]
+
+  "@esbuild/linux-ppc64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-CAXl+Dtd9UUuJd8pKKdwh6MLm3MUMiqMPmhZ3tTSXPqfyQ3vDl6R5hZdZ/kYojK4ofXtdfSv1tFq8XzWx3heNQ==,
+      }
+    engines: { node: ">=18" }
+    cpu: [ppc64]
+    os: [linux]
+
+  "@esbuild/linux-riscv64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-GeXCej4IQtU1B+QlDV8W/RRvbzI3O/Stss+/bCXv4lZls5WGRtu2a+3JkA3i4qIUlMXpcHebWpF8AkJhATowuA==,
+      }
+    engines: { node: ">=18" }
+    cpu: [riscv64]
+    os: [linux]
+
+  "@esbuild/linux-s390x@0.28.2":
+    resolution:
+      {
+        integrity: sha512-3H1weTYZPxt/WOhByszQZybS9w5lKzUn1FDMsgEChbHWQwHYQQRfBxgCcZvPhjHfKyJjIievvMmEUawJrdY9Dg==,
+      }
+    engines: { node: ">=18" }
+    cpu: [s390x]
+    os: [linux]
+
+  "@esbuild/linux-x64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-4xTZr1FUmSoQW4XIWmit3tzQrUTZM+N3P0XV8xROKYF50XfI7xeO90+1bZvNwxIufQ9hDQVRJH5YhgPVF8A/HQ==,
+      }
+    engines: { node: ">=18" }
+    cpu: [x64]
+    os: [linux]
+
+  "@esbuild/netbsd-arm64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-sSATRjPeDBg3pdgHoQfoYBob11Kk1FGa9lui5RIHZCoCkJa9QKlvl3/vKz2usCmYYjs7ymJR/2Nnsqe+Hjt5nw==,
+      }
+    engines: { node: ">=18" }
+    cpu: [arm64]
+    os: [netbsd]
+
+  "@esbuild/netbsd-x64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-lqnzCV+mM0gIADaKihiCg6ifgfU2L3h5E33rNQBN1Y4MaVGnzryzmvvf7UHxprpQdE8hpqLolJ9Rl+SkIRDpyw==,
+      }
+    engines: { node: ">=18" }
+    cpu: [x64]
+    os: [netbsd]
+
+  "@esbuild/openbsd-arm64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-AL2qJILH7lNjrDmCQDvdxMfAUIv8KMNZOvrwAQ8i8//ntL9FflhOyMJ8OZSMBb8/AWXe3/5v5S20y3zCoZWKoQ==,
+      }
+    engines: { node: ">=18" }
+    cpu: [arm64]
+    os: [openbsd]
+
+  "@esbuild/openbsd-x64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-QtiuPytchRyC4rwUKhexJdQKvDuZ6hWloi3igqPQNUJCS1/v9EiO3UTOXR6A3FoMo4fnAKbWJdqaIwhOzh8qEw==,
+      }
+    engines: { node: ">=18" }
+    cpu: [x64]
+    os: [openbsd]
+
+  "@esbuild/openharmony-arm64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-WkhYDmpTjLvGlScA1rwjRUmhl4k8oXR3cIbtqWmELgU/dFeHHlEllxDvdWcNJV9rbzCexB5vz8gtNewWLgCT7Q==,
+      }
+    engines: { node: ">=18" }
+    cpu: [arm64]
+    os: [openharmony]
+
+  "@esbuild/sunos-x64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-GPMSkTOtMnv2U2F8gxe4Io6qmVs+YKyp832Etqqxr0hFngmXQ3rzwytelm3GIn7T4VviRUlf3sOgBOiTdvaf7g==,
+      }
+    engines: { node: ">=18" }
+    cpu: [x64]
+    os: [sunos]
+
+  "@esbuild/win32-arm64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-PIhhEkE9uPBleRBrQEJpUn7MBnibZzbGzYWPmY3x+YoVg/95zbjB4CxPPOQ8l5tYYM4mMaCthF8/1DIfBQQyWQ==,
+      }
+    engines: { node: ">=18" }
+    cpu: [arm64]
+    os: [win32]
+
+  "@esbuild/win32-ia32@0.28.2":
+    resolution:
+      {
+        integrity: sha512-YmJbfTlvU7Sdn9BB+4PRES4oB6pxgS37MAONj+hBr/cpXS1aBPKXxNnDbu+QCWPj0o9dgyxeq79g6c5P8KeuYA==,
+      }
+    engines: { node: ">=18" }
+    cpu: [ia32]
+    os: [win32]
+
+  "@esbuild/win32-x64@0.28.2":
+    resolution:
+      {
+        integrity: sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g==,
+      }
+    engines: { node: ">=18" }
+    cpu: [x64]
+    os: [win32]
+
+  "@napi-rs/keyring-darwin-arm64@2.1.2":
+    resolution:
+      {
+        integrity: sha512-vsInUWUzWS6/WzR/TFNwmdtmwKWjnnR8TOpvZ/pjjxDAkJB/waz37PWzp2b8AFcw1aCcq2aQ7k2vvbLQy8pTrw==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [arm64]
+    os: [darwin]
+
+  "@napi-rs/keyring-darwin-x64@2.1.2":
+    resolution:
+      {
+        integrity: sha512-wQihYroaQ3r++R6u5c9Gj0TCw1l1F53LCb5aLOXfVvT4DsnDnpe7p7VGYo4/33bLe0iqVevtAj+ET3yKCtOlJQ==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [x64]
+    os: [darwin]
+
+  "@napi-rs/keyring-freebsd-x64@2.1.2":
+    resolution:
+      {
+        integrity: sha512-Ve5ha7MbJsq+4TYyXYiTy4IeZOnYxkBB05uH2+nIrEKBkHmyfHttF814EfWAfoJa63KqBhYRXdYJo0o1WVL2sg==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [x64]
+    os: [freebsd]
+
+  "@napi-rs/keyring-linux-arm-gnueabihf@2.1.2":
+    resolution:
+      {
+        integrity: sha512-zxijTnVnTApEyJMjgnLdVQL1g1DAudku/5brrWNDRWj4J0q0nFhUZEtzUA+nY2FvgDjl4s+2YCZYXSTH4TFMUg==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [arm]
+    os: [linux]
+
+  "@napi-rs/keyring-linux-arm64-gnu@2.1.2":
+    resolution:
+      {
+        integrity: sha512-PM+SAcl/yGzgGbeeCsKrnlG4T5DBIDjmDqtKm5an1bJz0o0gwSzR3BMiXf04JenkcqascZpdcIReoEvLj0cvCw==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  "@napi-rs/keyring-linux-arm64-musl@2.1.2":
+    resolution:
+      {
+        integrity: sha512-+ERS9oyInPCALN957cViBDbYJc724/Q+rZ8ZAz4rOHj4B4v0VR4OAWThdYZgZqD54sZVV0MdyX24qva97hYoAQ==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  "@napi-rs/keyring-linux-riscv64-gnu@2.1.2":
+    resolution:
+      {
+        integrity: sha512-pGADtqeT3U1SaFZGjkVsmZVjeNOQx0fr77S+NWszXjZboyaUOLlGKgqG6ssAWzcwxv8uPhKc9Ij17ujNZhSqLw==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [riscv64]
+    os: [linux]
+    libc: [glibc]
+
+  "@napi-rs/keyring-linux-x64-gnu@2.1.2":
+    resolution:
+      {
+        integrity: sha512-Fj5TmTnl2oriuCT5DDEYlhgxYes20uGfgOg10LK9PyPVsI8/PQ1m8I4rq/4A5hkrMtY7wvFb70YmX/yPHDYWvQ==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  "@napi-rs/keyring-linux-x64-musl@2.1.2":
+    resolution:
+      {
+        integrity: sha512-C+KhAeU6x2A43FV3dOmMvUraJb8zsC9VZfsunjZ1cgtuAb208TALaUuAY0jThOphXqhyhBJOs2xTCQhOrRkJIw==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  "@napi-rs/keyring-win32-arm64-msvc@2.1.2":
+    resolution:
+      {
+        integrity: sha512-kBq80ZZfjXoa5wHG9kgAVhYYjaPOLgHh5ngt7r1ftwFXPXDPXKH7oM2r2j2Q64cs0pVtmodVtn5Q9e6xCwzQUQ==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [arm64]
+    os: [win32]
+
+  "@napi-rs/keyring-win32-ia32-msvc@2.1.2":
+    resolution:
+      {
+        integrity: sha512-bhgKvVbWlZ6iR/tmvb2ht6/o0OzarUX9W7hjg+G+eVdGjR1prwtQ9lYo5ZESdn/+zyF1MIFvHkOCGja9YqDcww==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [ia32]
+    os: [win32]
+
+  "@napi-rs/keyring-win32-x64-msvc@2.1.2":
+    resolution:
+      {
+        integrity: sha512-yQtFdfuwqM0ezKlYO6r2n44in2LGzd4MC679Ddhvojip3t1hn+q/4I+gJU+cIJQVd5FAZSKNrK4tGfew3UTpAQ==,
+      }
+    engines: { node: ">= 10" }
+    cpu: [x64]
+    os: [win32]
+
+  "@napi-rs/keyring@2.1.2":
+    resolution:
+      {
+        integrity: sha512-9i1SR6tYeQ3o1beLeVMxhN6Fq513m9TZlTs+46+4JgvSNkaFoW9S4WrpV5MjzE+0CzVoC+dZ4RfZDIgW6+afnQ==,
+      }
+    engines: { node: ">= 10" }
+
+  better-sqlite3@13.0.3:
+    resolution:
+      {
+        integrity: sha512-RbOBxmLBG8uvFUc15X9+9SFemKcQ0WBuISBVkpuiaUB2qblC8UWlHEjdWVoZ8AdhSwmoEgsiXKfopX0CQxaACQ==,
+      }
+    engines: { node: ">=22" }
+
+  commander@9.5.0:
+    resolution:
+      {
+        integrity: sha512-KRs7WVDKg86PWiuAqhDrAQnTXZKraVcCc6vFdL14qrZ/DcWwuRo7VoiYXalXO7S5GKpqYiVEwCbgFDfxNHKJBQ==,
+      }
+    engines: { node: ^12.20.0 || >=14 }
+
+  esbuild@0.28.2:
+    resolution:
+      {
+        integrity: sha512-HKVLS8dvII+xoKW9kmqxbRKrnWEXfJJr/FZhhJmiqIB0e053QNYFqOBouTMO/k5sID4MvCiUCvv8b9M4h32wIA==,
+      }
+    engines: { node: ">=18" }
+    hasBin: true
+
+  node-addon-api@8.9.2:
+    resolution:
+      {
+        integrity: sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg==,
+      }
+    engines: { node: ^18 || ^20 || >= 21 }
+
+  postject@1.0.0-alpha.6:
+    resolution:
+      {
+        integrity: sha512-b9Eb8h2eVqNE8edvKdwqkrY6O7kAwmI8kcnBv1NScolYJbo59XUF0noFq+lxbC1yN20bmC0WBEbDC5H/7ASb0A==,
+      }
+    engines: { node: ">=14.0.0" }
+    hasBin: true
+
+snapshots:
+  "@esbuild/aix-ppc64@0.28.2":
+    optional: true
+
+  "@esbuild/android-arm64@0.28.2":
+    optional: true
+
+  "@esbuild/android-arm@0.28.2":
+    optional: true
+
+  "@esbuild/android-x64@0.28.2":
+    optional: true
+
+  "@esbuild/darwin-arm64@0.28.2":
+    optional: true
+
+  "@esbuild/darwin-x64@0.28.2":
+    optional: true
+
+  "@esbuild/freebsd-arm64@0.28.2":
+    optional: true
+
+  "@esbuild/freebsd-x64@0.28.2":
+    optional: true
+
+  "@esbuild/linux-arm64@0.28.2":
+    optional: true
+
+  "@esbuild/linux-arm@0.28.2":
+    optional: true
+
+  "@esbuild/linux-ia32@0.28.2":
+    optional: true
+
+  "@esbuild/linux-loong64@0.28.2":
+    optional: true
+
+  "@esbuild/linux-mips64el@0.28.2":
+    optional: true
+
+  "@esbuild/linux-ppc64@0.28.2":
+    optional: true
+
+  "@esbuild/linux-riscv64@0.28.2":
+    optional: true
+
+  "@esbuild/linux-s390x@0.28.2":
+    optional: true
+
+  "@esbuild/linux-x64@0.28.2":
+    optional: true
+
+  "@esbuild/netbsd-arm64@0.28.2":
+    optional: true
+
+  "@esbuild/netbsd-x64@0.28.2":
+    optional: true
+
+  "@esbuild/openbsd-arm64@0.28.2":
+    optional: true
+
+  "@esbuild/openbsd-x64@0.28.2":
+    optional: true
+
+  "@esbuild/openharmony-arm64@0.28.2":
+    optional: true
+
+  "@esbuild/sunos-x64@0.28.2":
+    optional: true
+
+  "@esbuild/win32-arm64@0.28.2":
+    optional: true
+
+  "@esbuild/win32-ia32@0.28.2":
+    optional: true
+
+  "@esbuild/win32-x64@0.28.2":
+    optional: true
+
+  "@napi-rs/keyring-darwin-arm64@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring-darwin-x64@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring-freebsd-x64@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring-linux-arm-gnueabihf@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring-linux-arm64-gnu@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring-linux-arm64-musl@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring-linux-riscv64-gnu@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring-linux-x64-gnu@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring-linux-x64-musl@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring-win32-arm64-msvc@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring-win32-ia32-msvc@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring-win32-x64-msvc@2.1.2":
+    optional: true
+
+  "@napi-rs/keyring@2.1.2":
+    optionalDependencies:
+      "@napi-rs/keyring-darwin-arm64": 2.1.2
+      "@napi-rs/keyring-darwin-x64": 2.1.2
+      "@napi-rs/keyring-freebsd-x64": 2.1.2
+      "@napi-rs/keyring-linux-arm-gnueabihf": 2.1.2
+      "@napi-rs/keyring-linux-arm64-gnu": 2.1.2
+      "@napi-rs/keyring-linux-arm64-musl": 2.1.2
+      "@napi-rs/keyring-linux-riscv64-gnu": 2.1.2
+      "@napi-rs/keyring-linux-x64-gnu": 2.1.2
+      "@napi-rs/keyring-linux-x64-musl": 2.1.2
+      "@napi-rs/keyring-win32-arm64-msvc": 2.1.2
+      "@napi-rs/keyring-win32-ia32-msvc": 2.1.2
+      "@napi-rs/keyring-win32-x64-msvc": 2.1.2
+
+  better-sqlite3@13.0.3:
+    dependencies:
+      node-addon-api: 8.9.2
+
+  commander@9.5.0: {}
+
+  esbuild@0.28.2:
+    optionalDependencies:
+      "@esbuild/aix-ppc64": 0.28.2
+      "@esbuild/android-arm": 0.28.2
+      "@esbuild/android-arm64": 0.28.2
+      "@esbuild/android-x64": 0.28.2
+      "@esbuild/darwin-arm64": 0.28.2
+      "@esbuild/darwin-x64": 0.28.2
+      "@esbuild/freebsd-arm64": 0.28.2
+      "@esbuild/freebsd-x64": 0.28.2
+      "@esbuild/linux-arm": 0.28.2
+      "@esbuild/linux-arm64": 0.28.2
+      "@esbuild/linux-ia32": 0.28.2
+      "@esbuild/linux-loong64": 0.28.2
+      "@esbuild/linux-mips64el": 0.28.2
+      "@esbuild/linux-ppc64": 0.28.2
+      "@esbuild/linux-riscv64": 0.28.2
+      "@esbuild/linux-s390x": 0.28.2
+      "@esbuild/linux-x64": 0.28.2
+      "@esbuild/netbsd-arm64": 0.28.2
+      "@esbuild/netbsd-x64": 0.28.2
+      "@esbuild/openbsd-arm64": 0.28.2
+      "@esbuild/openbsd-x64": 0.28.2
+      "@esbuild/openharmony-arm64": 0.28.2
+      "@esbuild/sunos-x64": 0.28.2
+      "@esbuild/win32-arm64": 0.28.2
+      "@esbuild/win32-ia32": 0.28.2
+      "@esbuild/win32-x64": 0.28.2
+
+  node-addon-api@8.9.2: {}
+
+  postject@1.0.0-alpha.6:
+    dependencies:
+      commander: 9.5.0

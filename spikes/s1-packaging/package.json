@@ -1,0 +1,20 @@
+{
+  "name": "agent-vault-spike-s1",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Throwaway spike S1: Node SEA + native addons + keyring on 3 OSes",
+  "packageManager": "pnpm@12.14.0",
+  "scripts": {
+    "build": "node build.mjs",
+    "run:plain": "node dist/main.cjs",
+    "run:sea": "node run-sea.mjs"
+  },
+  "dependencies": {
+    "@napi-rs/keyring": "2.1.2",
+    "better-sqlite3": "13.0.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "postject": "1.0.0-alpha.6"
+  }
+}
