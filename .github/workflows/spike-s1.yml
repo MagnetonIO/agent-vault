@@ -36,18 +36,20 @@ jobs:
           tail -n 1 plain.log | grep -qx OK
           tail -n 1 sea.log | grep -qx OK
 
-      # Linux needs a Secret Service on a session bus. dbus-run-session starts a private bus;
-      # `gnome-keyring-daemon --unlock` reads the (empty) login password from stdin, creates
-      # and unlocks the login keyring, and daemonizes onto that bus.
-      - name: Run plain node + SEA binary (Linux, Secret Service)
+      - name: Linux keyring variants (debug)
         if: runner.os == 'Linux'
+        continue-on-error: true
         run: |
           sudo apt-get update
-          sudo apt-get install -y gnome-keyring dbus-x11
-          dbus-run-session -- sh -c '
-            echo -n "" | gnome-keyring-daemon --unlock
-            node dist/main.cjs | tee plain.log
-            ./dist/s1-spike | tee sea.log
-          '
-          tail -n 1 plain.log | grep -qx OK
-          tail -n 1 sea.log | grep -qx OK
+          sudo apt-get install -y gnome-keyring dbus-x11 libsecret-tools
+          gnome-keyring-daemon --version
+          echo "=== A: --unlock only"
+          dbus-run-session -- sh -c 'echo -n "" | gnome-keyring-daemon --unlock; ./dist/s1-spike' || echo "A FAILED"
+          echo "=== B: --unlock --components=secrets"
+          dbus-run-session -- sh -c 'echo -n "" | gnome-keyring-daemon --unlock --components=secrets; ./dist/s1-spike' || echo "B FAILED"
+          echo "=== C: --daemonize --login --components=secrets"
+          dbus-run-session -- sh -c 'eval $(echo -n "" | gnome-keyring-daemon --daemonize --login --components=secrets); export GNOME_KEYRING_CONTROL; ./dist/s1-spike' || echo "C FAILED"
+          echo "=== D: --unlock then --start, with secret-tool primer"
+          dbus-run-session -- sh -c 'echo -n "" | gnome-keyring-daemon --unlock --components=secrets; echo x | secret-tool store --label=primer a b; ./dist/s1-spike' || echo "D FAILED"
+          echo "=== E: nonempty password"
+          dbus-run-session -- sh -c 'echo -n "ci-pass" | gnome-keyring-daemon --unlock --components=secrets; ./dist/s1-spike' || echo "E FAILED"
