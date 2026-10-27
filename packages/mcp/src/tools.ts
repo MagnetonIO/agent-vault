@@ -141,6 +141,45 @@ function abortion(signal: AbortSignal): Promise<"aborted"> {
   });
 }
 
+type Stored = Extract<CaptureWait, { status: "stored" }>;
+
+/**
+ * Wait for the key behind `elicitationId`, in slices under the IPC call timeout, until it is
+ * stored, the link is gone, the overall deadline passes or `stopped` fires. `linkEnds` is NaN
+ * when the link's own expiry is not known.
+ */
+async function awaitStored(
+  client: IpcClient,
+  limits: Limits,
+  elicitationId: string,
+  linkEnds: number,
+  stop: AbortSignal,
+): Promise<Stored | undefined> {
+  const stopped = abortion(stop);
+  const deadline = Date.now() + limits.captureDeadlineMs;
+  while (!stop.aborted) {
+    const slice = Math.min(limits.waitMs, deadline - Date.now());
+    if (slice <= 0) return undefined;
+    const startedAt = Date.now();
+    const waited = await Promise.race([
+      client.call<CaptureWait>(
+        "capture.wait",
+        { elicitationId, timeoutMs: slice },
+        { timeoutMs: slice + 5_000 },
+      ),
+      stopped,
+    ]);
+    if (waited === "aborted") return undefined;
+    if (waited.status === "stored") return waited;
+    // "expired" also means "not within this slice". It is final once the link is gone: the call
+    // came back early, or the link's own time is up.
+    if (Date.now() - startedAt < slice - 100 || Date.now() >= linkEnds) return undefined;
+  }
+  return undefined;
+}
+
+const storedText = (s: Stored): string => `Stored as ${s.name} · ${s.type} · ${s.length} bytes`;
+
 async function capture(
   server: McpServer,
   ctx: ToolContext,
@@ -153,66 +192,45 @@ async function capture(
       ...(name !== undefined && { name }),
       harness: ctx.harness(),
     });
-    const { url, elicitationId } = begun;
+    const { url, elicitationId, expiresAt } = begun;
 
-    const stop = new AbortController();
-    const stopped = abortion(stop.signal);
-    toolSignal.addEventListener("abort", () => stop.abort(), { once: true });
-
-    // The link must reach the user: through the client's own URL prompt if it has one, otherwise
-    // the browser and the result text.
-    let declined: string | undefined;
-    let showUrl = true;
-    const urlMode = server.server.getClientCapabilities()?.elicitation?.url !== undefined;
-    if (urlMode) {
-      showUrl = false;
-      void server.server
-        .elicitInput(
-          { mode: "url", url, elicitationId, message: ELICIT_MESSAGE },
-          { signal: stop.signal, timeout: limits.captureDeadlineMs },
-        )
-        .then((reply) => {
-          // "accept" only means the user agreed to open the link; the key arrives via capture.wait.
-          if (reply.action !== "accept") {
-            declined = reply.action;
-            stop.abort();
-          }
-        })
-        .catch(() => {
-          // Aborted by us, or the client cannot take the request: fall back to the browser.
-          if (!stop.signal.aborted) void ctx.openUrl(url).catch(() => {});
-        });
-    } else {
-      void ctx.openUrl(url).catch(() => {});
+    // Without a URL prompt the agent has to relay the link, so return it now and let
+    // vault_capture_wait do the waiting.
+    if (server.server.getClientCapabilities()?.elicitation?.url === undefined) {
+      await ctx.openUrl(url).catch(() => {});
+      return {
+        ...ok(
+          `Open ${url} in your browser to add the key (expires ${expiresAt}). Then call vault_capture_wait with elicitationId ${elicitationId}.`,
+        ),
+        structuredContent: { url, elicitationId, expiresAt },
+      };
     }
 
-    const deadline = Date.now() + limits.captureDeadlineMs;
-    const linkEnds = Date.parse(begun.expiresAt);
-    let stored: Extract<CaptureWait, { status: "stored" }> | undefined;
-    try {
-      while (!stop.signal.aborted) {
-        const slice = Math.min(limits.waitMs, deadline - Date.now());
-        if (slice <= 0) break;
-        const startedAt = Date.now();
-        const waited = await Promise.race([
-          client.call<CaptureWait>(
-            "capture.wait",
-            { elicitationId, timeoutMs: slice },
-            { timeoutMs: slice + 5_000 },
-          ),
-          stopped,
-        ]);
-        if (waited === "aborted") break;
-        if (waited.status === "stored") {
-          stored = waited;
-          break;
+    const stop = new AbortController();
+    toolSignal.addEventListener("abort", () => stop.abort(), { once: true });
+    let declined: string | undefined;
+    void server.server
+      .elicitInput(
+        { mode: "url", url, elicitationId, message: ELICIT_MESSAGE },
+        { signal: stop.signal, timeout: limits.captureDeadlineMs },
+      )
+      .then((reply) => {
+        // "accept" only means the user agreed to open the link; the key arrives via capture.wait.
+        if (reply.action !== "accept") {
+          declined = reply.action;
+          stop.abort();
         }
-        // "expired" also means "not within this slice". It is final once the link is gone: the
-        // call came back early, or the link's own time is up.
-        if (Date.now() - startedAt < slice - 100 || Date.now() >= linkEnds) break;
-      }
+      })
+      .catch(() => {
+        // Aborted by us, or the client cannot take the request: fall back to the browser.
+        if (!stop.signal.aborted) void ctx.openUrl(url).catch(() => {});
+      });
+
+    let stored: Stored | undefined;
+    try {
+      stored = await awaitStored(client, limits, elicitationId, Date.parse(expiresAt), stop.signal);
     } finally {
-      if (urlMode && stored !== undefined) {
+      if (stored !== undefined) {
         await server.server
           .createElicitationCompletionNotifier(elicitationId)()
           .catch(() => {});
@@ -220,19 +238,31 @@ async function capture(
       stop.abort();
     }
 
-    const lines = showUrl ? [`Open ${url} to add the key`] : [];
-    if (stored !== undefined) {
-      lines.push(`Stored as ${stored.name} · ${stored.type} · ${stored.length} bytes`);
-    } else if (declined !== undefined) {
-      lines.push(
+    if (stored !== undefined) return ok(storedText(stored));
+    if (declined !== undefined) {
+      return ok(
         `The user ${declined === "cancel" ? "cancelled" : "declined"} the capture; nothing was stored.`,
       );
-    } else if (toolSignal.aborted) {
-      lines.push("Capture cancelled; nothing was stored.");
-    } else {
-      lines.push(EXPIRED);
     }
-    return ok(lines.join("\n"));
+    if (toolSignal.aborted) return ok("Capture cancelled; nothing was stored.");
+    return ok(EXPIRED);
+  });
+}
+
+async function captureWait(
+  ctx: ToolContext,
+  elicitationId: string,
+  toolSignal: AbortSignal,
+): Promise<ToolResult> {
+  return withDaemon(ctx, async (client) => {
+    const stop = new AbortController();
+    toolSignal.addEventListener("abort", () => stop.abort(), { once: true });
+    try {
+      const stored = await awaitStored(client, ctx.limits, elicitationId, Number.NaN, stop.signal);
+      return ok(stored !== undefined ? storedText(stored) : EXPIRED);
+    } finally {
+      stop.abort();
+    }
   });
 }
 
@@ -339,7 +369,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
     "vault_capture",
     {
-      description: `Ask the user to add an API key to the vault. The user types it into a local page in their browser; you only get its name back. Waits for them to finish. ${NEVER_PASTE}`,
+      description: `Ask the user to add an API key to the vault. The user types it into a local page in their browser; you only get its name back. Waits for them to finish, unless it returns a link: then tell the user to open it and call vault_capture_wait. ${NEVER_PASTE}`,
       inputSchema: {
         name: z
           .string()
@@ -348,6 +378,20 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       },
     },
     ({ name }, extra) => guard(() => capture(server, ctx, name, extra.signal)),
+  );
+
+  server.registerTool(
+    "vault_capture_wait",
+    {
+      description: `Call after vault_capture when the user was given a link. Waits until they have added the key, then returns its name. ${NEVER_PASTE}`,
+      inputSchema: {
+        elicitationId: z
+          .string()
+          .regex(/^[0-9a-f-]{36}$/i, "not an elicitationId from vault_capture")
+          .describe("The elicitationId vault_capture returned."),
+      },
+    },
+    ({ elicitationId }, extra) => guard(() => captureWait(ctx, elicitationId, extra.signal)),
   );
 
   server.registerTool(

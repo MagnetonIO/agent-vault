@@ -163,11 +163,12 @@ describe("harnessFor", () => {
 describe("tool list", () => {
   const env = useEnv();
 
-  test("the four tools, each telling the agent never to ask for keys", async () => {
+  test("the five tools, each telling the agent never to ask for keys", async () => {
     const c = await env.mcp();
     const { tools } = await c.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "vault_capture",
+      "vault_capture_wait",
       "vault_list",
       "vault_run",
       "vault_status",
@@ -260,42 +261,56 @@ describe("vault_capture with URL-mode elicitation", () => {
   });
 });
 
+const LINK =
+  /^Open (http:\/\/127\.0\.0\.1:\d+\/capture\/\S+) in your browser to add the key \(expires (\S+)\)\. Then call vault_capture_wait with elicitationId ([0-9a-f-]{36})\.$/;
+
 describe("vault_capture without URL-mode elicitation", () => {
   const env = useEnv();
 
-  test("opens the url best effort and returns it as text with the stored name", async () => {
+  test("returns at once with the link, then vault_capture_wait gets the stored name", async () => {
     const opened: string[] = [];
     const c = await env.mcp({
       server: {
         openUrl: async (url) => {
           opened.push(url);
-          // The browser opens; the user submits.
-          void submitCapture(url, { name: "api/text", value: SECRET });
         },
       },
     });
+    const started = Date.now();
     const r = await call(c, "vault_capture", { name: "api/text" });
-    expect(opened).toHaveLength(1);
-    expect(texts(r)).toContain(`Open ${opened[0]} to add the key`);
-    expect(texts(r)).toContain(`Stored as api/text · generic · ${SECRET.length} bytes`);
+    expect(Date.now() - started).toBeLessThan(1000);
+    const m = LINK.exec(texts(r));
+    expect(m).not.toBeNull();
+    const [, url = "", expiresAt = "", elicitationId = ""] = m ?? [];
+    expect(opened).toEqual([url]);
+    expect(Number.isNaN(Date.parse(expiresAt))).toBe(false);
+    expect((r as Result & { structuredContent?: unknown }).structuredContent).toEqual({
+      url,
+      elicitationId,
+      expiresAt,
+    });
     expectNoSecret(r);
+
+    // The user opens the link and submits while the agent waits.
+    const waiting = call(c, "vault_capture_wait", { elicitationId });
+    expect(await submitCapture(url, { name: "api/text", value: SECRET })).toBe(200);
+    const done = await waiting;
+    expect(done.isError).toBeFalsy();
+    expect(texts(done)).toBe(`Stored as api/text · generic · ${SECRET.length} bytes`);
+    expectNoSecret(done);
   });
 
-  test("a failing openUrl still returns the url", async () => {
-    let url = "";
+  test("a failing openUrl still returns the link", async () => {
     const c = await env.mcp({
       server: {
-        openUrl: async (u) => {
-          url = u;
-          void submitCapture(u, { name: "api/headless", value: SECRET });
+        openUrl: async () => {
           throw new Error("no browser here");
         },
       },
     });
-    const r = await call(c, "vault_capture", { name: "api/headless" });
+    const r = await call(c, "vault_capture", {});
     expect(r.isError).toBeFalsy();
-    expect(texts(r)).toContain(`Open ${url} to add the key`);
-    expect(texts(r)).toContain("Stored as api/headless");
+    expect(texts(r)).toMatch(LINK);
   });
 
   test("a client with only form elicitation takes this path too", async () => {
@@ -305,35 +320,54 @@ describe("vault_capture without URL-mode elicitation", () => {
         env.opened.push(c);
         return c;
       },
-      openUrl: async (u) => void submitCapture(u, { name: "api/form", value: SECRET }),
+      openUrl: async () => {},
     });
-    const client = new Client({ name: "form-only", version: "1" }, { capabilities: {} });
+    const client = new Client(
+      { name: "form-only", version: "1" },
+      { capabilities: { elicitation: { form: {} } } },
+    );
     const [a, b] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(a), client.connect(b)]);
-    const r = await call(client, "vault_capture", { name: "api/form" });
-    expect(texts(r)).toContain("Stored as api/form");
+    expect(texts(await call(client, "vault_capture", {}))).toMatch(LINK);
     await client.close();
+  });
+
+  test("an unknown elicitationId ends cleanly and a malformed one is an error", async () => {
+    const c = await env.mcp();
+    const unknown = await call(c, "vault_capture_wait", {
+      elicitationId: "00000000-0000-4000-8000-000000000000",
+    });
+    expect(unknown.isError).toBeFalsy();
+    expect(texts(unknown)).toBe("Capture expired; call vault_capture again");
+    const bad = await c
+      .callTool({ name: "vault_capture_wait", arguments: { elicitationId: "not an id" } })
+      .then(
+        (x) => (x as Result).isError === true,
+        () => true,
+      );
+    expect(bad).toBe(true);
   });
 });
 
-describe("vault_capture expiry", () => {
+describe("vault_capture_wait expiry", () => {
   const env = useEnv({ capture: { ttlMs: 150 } });
 
-  test("an unused link ends with the call-again message", async () => {
+  test("an unused link ends with the call-again message (URL mode)", async () => {
     const c = await env.mcp({ elicitation: true, onElicit: async () => ({ action: "accept" }) });
     const r = await call(c, "vault_capture", {});
     expect(texts(r)).toBe("Capture expired; call vault_capture again");
   });
 
-  test("the text path says the same, after the url", async () => {
+  test("an unused link ends the same way after vault_capture", async () => {
     const c = await env.mcp();
     const r = await call(c, "vault_capture", {});
-    expect(texts(r)).toMatch(/^Open http:\/\/127\.0\.0\.1:\d+\/capture\/\S+ to add the key\n/);
-    expect(texts(r)).toContain("Capture expired; call vault_capture again");
+    const id = LINK.exec(texts(r))?.[3] ?? "";
+    const waited = await call(c, "vault_capture_wait", { elicitationId: id });
+    expect(texts(waited)).toBe("Capture expired; call vault_capture again");
   });
 });
 
-describe("vault_capture deadline", () => {
+describe("vault_capture_wait deadline", () => {
   const env = useEnv();
 
   test("the overall deadline ends the wait", async () => {
@@ -341,7 +375,11 @@ describe("vault_capture deadline", () => {
       server: { limits: { captureDeadlineMs: 300, waitMs: 100 } },
     });
     const r = await call(c, "vault_capture", {});
-    expect(texts(r)).toContain("Capture expired; call vault_capture again");
+    const id = LINK.exec(texts(r))?.[3] ?? "";
+    const started = Date.now();
+    const waited = await call(c, "vault_capture_wait", { elicitationId: id });
+    expect(texts(waited)).toBe("Capture expired; call vault_capture again");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
   });
 });
 
@@ -466,6 +504,7 @@ describe("daemon unreachable", () => {
       ["vault_list", {}],
       ["vault_status", {}],
       ["vault_capture", {}],
+      ["vault_capture_wait", { elicitationId: "00000000-0000-4000-8000-000000000000" }],
       ["vault_run", { bundle: "ci", argv: ["x"] }],
     ] as const) {
       const r = await call(c, name, args);
@@ -473,12 +512,22 @@ describe("daemon unreachable", () => {
       expect(texts(r), name).toMatch(/could not reach the agent-vault daemon/);
     }
     // Still answering protocol requests afterwards.
-    expect((await c.listTools()).tools).toHaveLength(4);
+    expect((await c.listTools()).tools).toHaveLength(5);
   });
 });
 
 describe("no tool result carries secret bytes", () => {
   const env = useEnv();
+
+  /** The text-link path: vault_capture, the user's submit, vault_capture_wait. */
+  async function nonUrlCapture(e: Env): Promise<Result[]> {
+    const c = await e.mcp();
+    const first = await call(c, "vault_capture", { name: "api/sweep2" });
+    const m = LINK.exec(texts(first));
+    const waiting = call(c, "vault_capture_wait", { elicitationId: m?.[3] ?? "" });
+    await submitCapture(m?.[1] ?? "", { name: "api/sweep2", value: SECRET });
+    return [first, await waiting];
+  }
 
   // The daemon redacts the forms the detect redactor knows (raw, base64, url, json); a child that
   // hex-encodes its own secret is outside that contract, so the run here prints only those.
@@ -496,6 +545,7 @@ describe("no tool result carries secret bytes", () => {
       await call(c, "vault_list"),
       await call(c, "vault_status"),
       await call(c, "vault_capture", { name: "api/sweep" }),
+      ...(await nonUrlCapture(env)),
       await call(c, "vault_run", {
         bundle: "sweep",
         argv: [
@@ -580,6 +630,7 @@ describe("agent-vault mcp over stdio", () => {
     };
     expect(list.result.tools.map((t) => t.name).sort()).toEqual([
       "vault_capture",
+      "vault_capture_wait",
       "vault_list",
       "vault_run",
       "vault_status",
