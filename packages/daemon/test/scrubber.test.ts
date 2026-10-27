@@ -552,6 +552,57 @@ describe("file hazards", () => {
     expect(result.skipped).toEqual([]);
   });
 
+  describe("a line the harness is in the middle of writing", () => {
+    const appendOnce = (file: string, tail: string, check: 1 | 2 = 1) => {
+      let done = false;
+      return (at: 1 | 2) => {
+        if (done || at !== check) return;
+        done = true;
+        fs.appendFileSync(file, tail);
+      };
+    };
+
+    test("the rest of the line arrives at the first check: scrubbed as one line", async () => {
+      const file = write("mid.jsonl", `${jsonl({ a: SECRET })}{"b":"x ${SECRET.slice(0, 20)}`);
+      const result = await scrubFiles([file], R, {
+        beforeFinalCheck: appendOnce(file, `${SECRET.slice(20)}"}\n`),
+      });
+      expect(result).toMatchObject({ filesChanged: 1, replacements: 2, failed: [] });
+      expect(fs.readFileSync(file, "utf8")).not.toContain(SECRET.slice(0, 20));
+      expect(parseLines(file)).toEqual([{ a: REF }, { b: `x ${REF}` }]);
+    });
+
+    test("a split JSON escape is joined, not turned into an invalid one", async () => {
+      const file = write("esc.jsonl", `${jsonl({ a: "nimbus2024" })}{"b":"a\\`);
+      const result = await scrubFiles([file], [{ value: "nimbus2024", ref: REF }], {
+        beforeFinalCheck: appendOnce(file, 'nimbus2024"}\n'),
+      });
+      expect(result).toMatchObject({ filesChanged: 1, replacements: 1, failed: [] });
+      expect(parseLines(file)).toEqual([{ a: REF }, { b: "a\nimbus2024" }]);
+    });
+
+    test("growth after the partial line was written fails the file and leaves it as it was", async () => {
+      const file = write("late-mid.jsonl", `${jsonl({ a: SECRET })}{"b":"x ${SECRET.slice(0, 20)}`);
+      const result = await scrubFiles([file], R, {
+        beforeFinalCheck: appendOnce(file, `${SECRET.slice(20)}"}\n`, 2),
+      });
+      expect(result.filesChanged).toBe(0);
+      expect(result.failed).toEqual([{ file, reason: "file changed mid-line" }]);
+      expect(fs.readFileSync(file, "utf8")).toBe(`${jsonl({ a: SECRET })}{"b":"x ${SECRET}"}\n`);
+      expect(leftovers()).toEqual([]);
+    });
+  });
+
+  test("a line that is a bare JSON string is scrubbed as JSON", async () => {
+    const file = write(
+      "scalar.jsonl",
+      `"key ${SECRET}"\n"a\\nimbus2024"\n12345\n${jsonl({ ok: 1 })}`,
+    );
+    const result = await scrubFiles([file], [...R, { value: "nimbus2024", ref: "vault://n" }]);
+    expect(result.replacements).toBe(1);
+    expect(fs.readFileSync(file, "utf8")).toBe(`"key ${REF}"\n"a\\nimbus2024"\n12345\n{"ok":1}\n`);
+  });
+
   test("appends after the final size check but before the rename are caught", async () => {
     const file = write("late.jsonl", jsonl({ text: SECRET }));
     let appended = false;

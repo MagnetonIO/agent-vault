@@ -10,8 +10,12 @@ export class JsonCorruptionError extends Error {
   }
 }
 
-/** A line of a JSON Lines file: an object or an array after any leading whitespace. */
-const JSON_LIKE = /^\s*[{[]/;
+/**
+ * A line that may be JSON: an object, an array or a string after any leading whitespace. (A bare
+ * number, true, false or null has no string to scrub, so such a line is plain text: a secret that
+ * is the whole line is then still replaced.)
+ */
+const JSON_LIKE = /^\s*[{["]/;
 
 const escapeJson = (text: string): string => JSON.stringify(text).slice(1, -1);
 
@@ -70,14 +74,15 @@ export function createBlockScrubber(secrets: { name: string; value: string }[]):
     return out + core.slice(copied);
   }
 
-  function scrubJsonLine(line: string): string {
+  /** `line` scrubbed by its string values, or null if it is not JSON after all. */
+  function scrubJsonLine(line: string): string | null {
     const core = line.trim();
     const lead = line.slice(0, line.length - line.trimStart().length);
     const trail = line.slice(line.trimEnd().length);
     try {
       JSON.parse(core);
     } catch {
-      return redactText(line);
+      return null;
     }
     const scrubbed = scrubJsonText(core);
     if (scrubbed === core) return line;
@@ -99,15 +104,17 @@ export function createBlockScrubber(secrets: { name: string; value: string }[]):
         const end = nl === -1 ? block.length : nl + 1;
         const line = block.slice(pos, end);
         pos = end;
-        if (!JSON_LIKE.test(line)) {
-          run += line;
+        const json = JSON_LIKE.test(line) && hasNeedle(line);
+        const scrubbed = json ? scrubJsonLine(line) : null;
+        if (scrubbed === null && (json || !JSON_LIKE.test(line))) {
+          run += line; // plain text, or a line that only looked like JSON
           continue;
         }
         if (run !== "") {
           out += redactText(run);
           run = "";
         }
-        out += hasNeedle(line) ? scrubJsonLine(line) : line;
+        out += scrubbed ?? line;
       }
       return run === "" ? out : out + redactText(run);
     },

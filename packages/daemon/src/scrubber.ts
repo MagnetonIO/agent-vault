@@ -46,8 +46,11 @@ export type ScrubOptions = {
   rename?: (from: string, to: string) => Promise<void>;
   /** Replaces `process.platform`; only `win32` retries a refused rename. */
   platform?: NodeJS.Platform;
-  /** Runs after the data is synced and before the last size check; tests append to the file here. */
-  beforeFinalCheck?: () => void | Promise<void>;
+  /**
+   * Runs just before a size check that decides whether the scrub is done (`check` 1: before the
+   * trailing partial line is written; 2: after). Tests append to the file here.
+   */
+  beforeFinalCheck?: (check: 1 | 2) => void | Promise<void>;
 };
 
 type Outcome =
@@ -240,17 +243,27 @@ async function scrubOne(
     };
 
     // Append safety (Review Focus 3): the harness may still be writing. Read until the size is
-    // stable, finish and fsync, then look once more: bytes that arrived meanwhile send us back.
+    // stable, then look once more: bytes that arrived meanwhile send us back to reading. The
+    // trailing partial line stays buffered and unwritten until that check passes, so a line the
+    // harness is in the middle of writing is scrubbed whole, never as two fragments.
     let last = opened;
     for (let round = 0; ; round++) {
       last = await readUntilStable();
-      await finish();
-      if (scrubber.matchCount() === 0) return { kind: "clean" };
-      await sink.sync();
-      await beforeFinalCheck?.();
-      if ((await source.stat()).size === offset) break;
-      if (round + 1 >= MAX_FINAL_ROUNDS)
+      if (scrubber.matchCount() > 0) await sink.sync();
+      await beforeFinalCheck?.(1);
+      if ((await source.stat()).size === offset) {
+        const partial = pending !== "";
+        await finish();
+        if (scrubber.matchCount() === 0) return { kind: "clean" };
+        if (partial) await sink.sync();
+        await beforeFinalCheck?.(2);
+        if ((await source.stat()).size === offset) break;
+        // Too late to rejoin the line we just wrote out.
+        if (partial) throw new Stop({ kind: "failed", reason: "file changed mid-line" });
+      }
+      if (round + 1 >= MAX_FINAL_ROUNDS) {
         throw new Stop({ kind: "failed", reason: "file kept growing" });
+      }
     }
     const replacements = scrubber.matchCount();
 
