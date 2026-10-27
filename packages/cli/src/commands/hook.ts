@@ -52,7 +52,7 @@ export async function runHook(
 export function hookCommand(program: Command): void {
   program
     .command("hook")
-    .argument("<harness>", "claude-code")
+    .argument("<harness>", "claude-code | codex")
     .argument("<event>", "prompt-submit | scrub")
     .addOption(
       new Option("--probe", "detect only: block a prompt with a key, store nothing").hideHelp(),

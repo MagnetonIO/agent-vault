@@ -8,7 +8,7 @@ import { say } from "../output.js";
 export function uninstallCommand(program: Command): void {
   program
     .command("uninstall")
-    .argument("<harness>", "claude-code")
+    .argument("<harness>", "claude-code | codex")
     .description("remove what `install` added; the harness's other settings stay")
     .action(async (harness: string) => {
       await adapterFor(harness)

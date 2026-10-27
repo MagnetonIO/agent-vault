@@ -22,3 +22,19 @@ export function table(rows: string[][]): string[] {
 
 export const storedLine = (m: { name: string; type: string; length: number }): string =>
   `stored ${m.name} · ${m.type} · ${m.length} chars`;
+
+/** `text` wrapped to `width` columns and drawn in a box of `+`, `-` and `|`. */
+export function box(text: string, width = 72): string[] {
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    if (line !== "" && line.length + 1 + word.length > width) {
+      lines.push(line);
+      line = word;
+    } else line = line === "" ? word : `${line} ${word}`;
+  }
+  if (line !== "") lines.push(line);
+  const inner = Math.max(...lines.map((l) => l.length));
+  const edge = `+${"-".repeat(inner + 2)}+`;
+  return [edge, ...lines.map((l) => `| ${l.padEnd(inner)} |`), edge];
+}
