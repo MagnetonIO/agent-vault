@@ -1,4 +1,5 @@
 import http from "node:http";
+import net from "node:net";
 import type { AuditEvent, SecretMeta } from "@agent-vault/core";
 import { describe, expect, test } from "vitest";
 import { escapeHtml, openCommand, openUrl } from "../src/capture-page.js";
@@ -55,6 +56,27 @@ function send(
     req.end(body);
   });
 }
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** A bare socket, to control exactly when headers and body bytes are sent. */
+function rawSocket(port: string) {
+  const socket = net.connect(Number(port), "127.0.0.1");
+  socket.on("error", () => {});
+  let data = "";
+  socket.on("data", (c: Buffer) => {
+    data += c.toString("latin1");
+  });
+  const closed = new Promise<string>((resolve) => socket.on("close", () => resolve(data)));
+  return { socket, closed };
+}
+
+const statusOf = (raw: string): number => Number(/^HTTP\/1\.1 (\d+)/.exec(raw)?.[1]);
+
+/** The head of a form POST that promises `length` body bytes. */
+const postHead = (u: URL, length: number): string =>
+  `POST ${u.pathname} HTTP/1.1\r\nHost: 127.0.0.1:${u.port}\r\nOrigin: ${u.origin}\r\n` +
+  `Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ${length}\r\nConnection: close\r\n\r\n`;
 
 const form = (fields: Record<string, string>): string => new URLSearchParams(fields).toString();
 const origin = (url: string): string => new URL(url).origin;
@@ -153,7 +175,7 @@ describe.each(MODES)("capture page over %s", (mode) => {
     const { url } = await begin({ name: "gh/token" });
     const res = await post(url, { name: "gh/token", value: SECRET });
     expect(res.status).toBe(200);
-    expect(res.body).toContain("Stored as gh/token · generic · 40 chars");
+    expect(res.body).toContain("Stored as gh/token · generic · 40 bytes");
     expect(res.body).not.toContain(SECRET);
     expect(res.body).not.toContain(Buffer.from(SECRET).toString("base64"));
 
@@ -169,10 +191,10 @@ describe.each(MODES)("capture page over %s", (mode) => {
     const [meta] = await env.client.call<SecretMeta[]>("secret.list");
     expect(meta?.name).not.toMatch(/^secret\/unnamed-/);
     expect(meta?.type).not.toBe("generic");
-    expect(res.body).toContain(`Stored as ${meta?.name} · ${meta?.type} · 40 chars`);
+    expect(res.body).toContain(`Stored as ${meta?.name} · ${meta?.type} · 40 bytes`);
 
     const plain = await post((await begin()).url, { name: "", value: "just a password" });
-    expect(plain.body).toMatch(/Stored as secret\/unnamed-\d{8} · generic · 15 chars/);
+    expect(plain.body).toMatch(/Stored as secret\/unnamed-\d{8} · generic · 15 bytes/);
   });
 
   test("a second POST with the same nonce is 410, and GET too", async () => {
@@ -266,6 +288,82 @@ describe.each(MODES)("capture page over %s", (mode) => {
     expect(res.body).toContain("&lt;script&gt;");
     expect(res.body).not.toContain(SECRET);
     expect((await post(url, { value: SECRET })).status).toBe(200);
+  });
+
+  test("two POSTs racing on one nonce: exactly one stores, one audit event", async () => {
+    const { url } = await begin();
+    const u = new URL(url);
+    const bodies = [
+      form({ name: "race/one", value: SECRET }),
+      form({ name: "race/two", value: `${SECRET}-2` }),
+    ];
+    const peers = bodies.map((b) => ({ b, ...rawSocket(u.port) }));
+    for (const p of peers) p.socket.write(postHead(u, Buffer.byteLength(p.b)));
+    await sleep(100); // both heads are through every check; neither body has arrived
+    for (const p of peers) p.socket.write(p.b);
+    const statuses = (await Promise.all(peers.map((p) => p.closed))).map(statusOf).sort();
+    expect(statuses).toEqual([200, 410]);
+    expect(await env.client.call<SecretMeta[]>("secret.list")).toHaveLength(1);
+    const events = await env.client.call<AuditEvent[]>("audit.query");
+    expect(events.filter((e) => e.operation === "capture")).toHaveLength(1);
+  });
+
+  test("a body that arrives after the TTL is 410 and stores nothing", async () => {
+    const { url } = await begin();
+    const u = new URL(url);
+    const body = form({ name: "late/body", value: SECRET });
+    const peer = rawSocket(u.port);
+    peer.socket.write(postHead(u, Buffer.byteLength(body)));
+    await sleep(100);
+    t += TTL;
+    peer.socket.write(body);
+    expect(statusOf(await peer.closed)).toBe(410);
+    expect(await env.client.call<SecretMeta[]>("secret.list")).toEqual([]);
+  });
+
+  test("two Host headers are 400, in either order", async () => {
+    const { url } = await begin();
+    const u = new URL(url);
+    for (const hosts of [
+      ["evil.com", `127.0.0.1:${u.port}`],
+      [`127.0.0.1:${u.port}`, "evil.com"],
+    ]) {
+      const peer = rawSocket(u.port);
+      const lines = hosts.map((h) => `Host: ${h}\r\n`).join("");
+      peer.socket.write(`GET ${u.pathname} HTTP/1.1\r\n${lines}Connection: close\r\n\r\n`);
+      expect(statusOf(await peer.closed)).toBe(400);
+    }
+    expect((await send(url)).status).toBe(200);
+  });
+
+  test("the page tells how to enter a multi-line key", async () => {
+    const { url } = await begin();
+    expect((await send(url)).body).toContain(
+      "For single-line keys. For multi-line keys (PEM files) run: agent-vault set &lt;name&gt; in a terminal.",
+    );
+  });
+
+  test("a PEM that lost its newlines is 400 with the hint and keeps the nonce", async () => {
+    const { url } = await begin();
+    const flat = "-----BEGIN PRIVATE KEY-----MIIEvQIBADANBgkq-----END PRIVATE KEY-----";
+    const res = await post(url, { name: "pem/key", value: flat });
+    expect(res.status).toBe(400);
+    expect(res.body).toContain("agent-vault set &lt;name&gt; in a terminal");
+    expect(res.body).not.toContain("MIIEvQ");
+    expect(await env.client.call<SecretMeta[]>("secret.list")).toEqual([]);
+    const intact = flat.replace("-----MIIE", "-----\nMIIE").replace("q-----END", "q\n-----END");
+    expect((await post(url, { name: "pem/key", value: intact })).status).toBe(200);
+  });
+
+  test("a key in the name field is 400, never echoed, and keeps the nonce", async () => {
+    const { url } = await begin({ name: "gh/token" });
+    const res = await post(url, { name: SECRET, value: "something" });
+    expect(res.status).toBe(400);
+    expect(res.body).toContain("That looks like a key; put it in the value field.");
+    expect(res.body).not.toContain(SECRET);
+    expect(res.body).toContain('value="gh/token"');
+    expect(await env.client.call<SecretMeta[]>("secret.list")).toEqual([]);
+    expect((await post(url, { name: "gh/token", value: SECRET })).status).toBe(200);
   });
 
   test("escapeHtml escapes the five HTML metacharacters", () => {
@@ -438,6 +536,26 @@ describe("capture before the vault exists", () => {
   });
 });
 
+describe("a header drip", () => {
+  const env = useDaemon(MODES[0] ?? "tcp", { init: true });
+
+  test("is cut off by headersTimeout (10 s) within 12 s", async () => {
+    const { url } = await env.client.call<Begun>("capture.begin");
+    const u = new URL(url);
+    const peer = rawSocket(u.port);
+    const start = Date.now();
+    peer.socket.write(`GET ${u.pathname} HTTP/1.1\r\nHost: 127.0.0.1:${u.port}\r\n`);
+    const drip = setInterval(() => peer.socket.write("X-Drip: 1\r\n"), 500);
+    try {
+      await peer.closed;
+    } finally {
+      clearInterval(drip);
+    }
+    expect(Date.now() - start).toBeLessThan(12_000);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(9_000);
+  }, 20_000);
+});
+
 describe.each(MODES)("a failed store over %s", (mode) => {
   const env = useDaemon(mode, {
     init: true,
@@ -495,10 +613,13 @@ describe("openCommand", () => {
   test("uses the platform opener without a shell", () => {
     expect(openCommand(url, "darwin")).toEqual({ file: "/usr/bin/open", args: [url] });
     expect(openCommand(url, "linux")).toEqual({ file: "xdg-open", args: [url] });
-    expect(openCommand(url, "win32")).toEqual({
-      file: "rundll32.exe",
+    expect(openCommand(url, "win32", {})).toEqual({
+      file: "C:\\Windows\\System32\\rundll32.exe",
       args: ["url.dll,FileProtocolHandler", url],
     });
+    expect(openCommand(url, "win32", { SystemRoot: "D:\\WINNT" }).file).toBe(
+      "D:\\WINNT\\System32\\rundll32.exe",
+    );
   });
 
   test("refuses anything but an http(s) url, so it cannot become an option or a file", async () => {

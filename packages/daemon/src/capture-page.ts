@@ -2,7 +2,9 @@ import { execFile } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import path from "node:path";
 import { appendAudit, VaultClosedError } from "@agent-vault/core";
+import { detectSecrets } from "@agent-vault/detect";
 import { deviceId, type Harness } from "./device.js";
 import { isValidName } from "./methods/params.js";
 import { storeSecret } from "./methods/secret.js";
@@ -90,6 +92,7 @@ function formPage(nonce: string, name: string, error?: string): string {
     "agent-vault: add a key",
     `<h1>Add a key</h1>
 <p class="note">Stored in agent-vault. The agent only ever sees the name.</p>
+<p class="note">${escapeHtml(MULTILINE_HINT)}</p>
 ${error === undefined ? "" : `<p class="err" role="alert">${escapeHtml(error)}</p>`}
 <form method="post" action="/capture/${escapeHtml(nonce)}">
 <label>Name (optional, blank to auto-detect)
@@ -232,6 +235,9 @@ const gone = (res: http.ServerResponse) =>
     ),
   );
 
+const MULTILINE_HINT =
+  "For single-line keys. For multi-line keys (PEM files) run: agent-vault set <name> in a terminal.";
+
 const FORM_TYPE = /^application\/x-www-form-urlencoded\s*(;|$)/i;
 
 export function createCaptureService(
@@ -244,7 +250,13 @@ export function createCaptureService(
   const byNonce = new Map<string, Entry>();
   const byId = new Map<string, Entry>();
   const server = http.createServer(
-    { headersTimeout: HEADERS_TIMEOUT_MS, requestTimeout: REQUEST_TIMEOUT_MS },
+    {
+      headersTimeout: HEADERS_TIMEOUT_MS,
+      requestTimeout: REQUEST_TIMEOUT_MS,
+      // How often node looks for timed-out connections; its default (30 s) would let a header
+      // drip outlive headersTimeout by that much.
+      connectionsCheckingInterval: 1000,
+    },
     (req, res) => {
       handle(req, res).catch(() => {
         if (!res.headersSent) {
@@ -299,6 +311,11 @@ export function createCaptureService(
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const port = (server.address() as AddressInfo).port;
+    // Two Host headers are ambiguous: node would keep the first, a proxy or browser the other.
+    if (req.headersDistinct.host?.length !== 1) {
+      reply(res, 400, messagePage("Bad request", "Send exactly one Host header.", true));
+      return;
+    }
     // Exactly our own host and port: a rebinding page reaches us under its own name.
     if (req.headers.host !== `127.0.0.1:${port}`) {
       reply(res, 421, messagePage("Misdirected request", "Wrong host.", true));
@@ -354,22 +371,43 @@ export function createCaptureService(
   }
 
   async function submit(entry: Entry, body: Buffer, res: http.ServerResponse): Promise<void> {
+    // The body took time to arrive: the link may have been used by a racing POST or expired.
+    // Nothing below awaits before the link is marked used, so exactly one POST gets past here.
+    if (entry.state !== "open" || !isLive(entry)) {
+      body.fill(0);
+      gone(res);
+      return;
+    }
     const form = parseForm(body);
     body.fill(0);
     const value = form.value;
     const typed = form.name?.trim();
     const name = typed === undefined || typed === "" ? undefined : typed;
     // Mistakes the user can fix on the same link: nothing is consumed.
-    const retry = (message: string) => {
+    const retry = (message: string, echoName = true) => {
       value?.fill(0);
-      reply(res, 400, formPage(entry.nonce, typed ?? entry.name ?? "", message));
+      reply(
+        res,
+        400,
+        formPage(entry.nonce, echoName ? (typed ?? entry.name ?? "") : (entry.name ?? ""), message),
+      );
     };
+    if (name !== undefined && detectSecrets(name).length > 0) {
+      // A key pasted into the name field would be echoed, stored as a name and audit-logged.
+      retry("That looks like a key; put it in the value field.", false);
+      return;
+    }
     if (name !== undefined && !isValidName(name)) {
       retry("That name is not valid. Use lowercase letters, digits, . _ - and / between parts.");
       return;
     }
     if (value === undefined || value.length === 0) {
       retry("Enter the key.");
+      return;
+    }
+    // A password field drops newlines, so a pasted PEM arrives as one line.
+    if (value.includes("-----BEGIN") && !value.includes(0x0a) && !value.includes(0x0d)) {
+      retry(`This looks like a multi-line key. ${MULTILINE_HINT}`);
       return;
     }
 
@@ -435,7 +473,7 @@ export function createCaptureService(
         500,
         messagePage(
           "Stored, not logged",
-          `Stored as ${meta.name} · ${meta.type} · ${meta.length} chars, but the audit log could not be written.`,
+          `Stored as ${meta.name} · ${meta.type} · ${meta.length} bytes, but the audit log could not be written.`,
           true,
         ),
       );
@@ -444,7 +482,7 @@ export function createCaptureService(
     reply(
       res,
       200,
-      messagePage("Stored", `Stored as ${meta.name} · ${meta.type} · ${meta.length} chars`),
+      messagePage("Stored", `Stored as ${meta.name} · ${meta.type} · ${meta.length} bytes`),
     );
   }
 
@@ -512,6 +550,7 @@ export function createCaptureService(
 export function openCommand(
   url: string,
   platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
 ): { file: string; args: string[] } {
   let href: string;
   try {
@@ -523,7 +562,12 @@ export function openCommand(
   }
   if (platform === "darwin") return { file: "/usr/bin/open", args: [href] };
   if (platform === "win32") {
-    return { file: "rundll32.exe", args: ["url.dll,FileProtocolHandler", href] };
+    // An absolute path: a bare name can be resolved from the current directory on Windows.
+    const system32 = path.win32.join(env.SystemRoot ?? "C:\\Windows", "System32");
+    return {
+      file: path.win32.join(system32, "rundll32.exe"),
+      args: ["url.dll,FileProtocolHandler", href],
+    };
   }
   return { file: "xdg-open", args: [href] };
 }
