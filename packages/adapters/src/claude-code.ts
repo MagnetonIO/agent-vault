@@ -109,7 +109,7 @@ function defaultRunClaude(env: NodeJS.ProcessEnv): ClaudeRunner {
     });
 }
 
-function defaultRunProbe(env: NodeJS.ProcessEnv): ProbeRunner {
+export function defaultRunProbe(env: NodeJS.ProcessEnv): ProbeRunner {
   return (command, stdin) =>
     new Promise((resolve) => {
       const child = spawn(command, {
@@ -129,7 +129,7 @@ function defaultRunProbe(env: NodeJS.ProcessEnv): ProbeRunner {
 }
 
 /** A key-shaped value made now, so no key-like literal exists in the source. */
-function fakeKey(): string {
+export function fakeKey(): string {
   const alnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   let body = "";
   for (let i = 0; i < 36; i++) body += alnum[randomInt(alnum.length)];

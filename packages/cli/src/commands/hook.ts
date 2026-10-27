@@ -44,7 +44,7 @@ const print = (out: HookOutput): void => {
 export function hookCommand(program: Command): void {
   program
     .command("hook")
-    .argument("<harness>", "claude-code")
+    .argument("<harness>", "claude-code | codex | opencode")
     .argument("<event>", "prompt-submit | scrub")
     .addOption(
       new Option("--probe", "detect only: block a prompt with a key, store nothing").hideHelp(),

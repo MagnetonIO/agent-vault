@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ensurePrivateDir } from "@agent-vault/platform";
 import type { JsonPath } from "./json-edit.js";
+import type { TomlEdit } from "./toml-edit.js";
 
 /**
  * What an install did to one file, kept so an uninstall can undo exactly that and nothing else:
@@ -17,6 +18,16 @@ export type FileState = {
   created: JsonPath[];
   /** The quoted command words the install wrote, e.g. `/usr/bin/node /opt/av/main.js`. */
   prefix: string;
+  /** Codex's `config.toml` is edited as text, not as JSON: the exact edits made, to undo. */
+  toml?:
+    | {
+        /** "cli" if `codex mcp add` added the MCP table (uninstall runs `codex mcp remove`). */
+        mcp: "cli" | null;
+        edits: TomlEdit[];
+        /** Trust keys whose hook changed under them, with the `trusted_hash` that went stale. */
+        staleTrust: Record<string, string>;
+      }
+    | undefined;
 };
 
 export type InstallState = { version: 1; files: Record<string, FileState> };

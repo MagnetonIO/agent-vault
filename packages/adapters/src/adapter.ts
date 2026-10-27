@@ -12,6 +12,10 @@ export type InstallOptions = {
    * It must exist and carry the `helper` tag.
    */
   modelKey?: string | undefined;
+  /** Codex only: the `model_providers` id that `modelKey` is wired into. Default `openai`. */
+  provider?: string | undefined;
+  /** Codex only: turn off all of Codex's own prompt history (`[history] persistence = "none"`). */
+  noHistory?: boolean | undefined;
 };
 
 export type InstallReport = {
@@ -22,6 +26,11 @@ export type InstallReport = {
   backups: string[];
   /** One line each for a person: what was done, and what was left alone or needs a step. */
   notes: string[];
+  /**
+   * A step the user must still take for the install to protect anything. The CLI prints it in a
+   * box as the very last output.
+   */
+  action?: string | undefined;
   /** Things that work now but may stop working; shown on stderr. */
   warnings?: string[] | undefined;
 };
@@ -34,6 +43,8 @@ export type DoctorCheck = {
   info?: boolean | undefined;
   /** What to run when `ok` is false. */
   fix?: string | undefined;
+  /** For an `ok` check that still deserves a look (`warn`) or is only a fact (`info`). */
+  severity?: "warn" | "info" | undefined;
   /** The check passes, but something may stop it from passing later. */
   warning?: string | undefined;
 };

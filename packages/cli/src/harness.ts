@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { isSea } from "node:sea";
 import {
   createClaudeCodeAdapter,
+  createCodexAdapter,
   createOpenCodeAdapter,
   type HarnessAdapter,
 } from "@agent-vault/adapters";
@@ -9,8 +10,8 @@ import { daemonClient } from "./context.js";
 import { CliError } from "./errors.js";
 import { warn } from "./output.js";
 
-/** The harnesses `install`, `uninstall`, `doctor` and `hook` know. Tasks 18 and 19 add theirs. */
-export const HARNESS_IDS = ["claude-code", "opencode"] as const;
+/** The harnesses `install`, `uninstall`, `doctor` and `hook` know. */
+export const HARNESS_IDS = ["claude-code", "codex", "opencode"] as const;
 
 /**
  * How this process was started, as absolute words a hook can run later without PATH: the
@@ -31,6 +32,12 @@ export function adapterFor(id: string): HarnessAdapter {
       return createClaudeCodeAdapter({
         command: selfCommand(),
         // stdin and stdout belong to the harness: never ask for a passphrase.
+        client: () => daemonClient(undefined, { interactive: false }),
+        log: warn,
+      });
+    case "codex":
+      return createCodexAdapter({
+        command: selfCommand(),
         client: () => daemonClient(undefined, { interactive: false }),
         log: warn,
       });
