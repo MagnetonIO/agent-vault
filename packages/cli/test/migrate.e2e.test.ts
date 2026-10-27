@@ -272,6 +272,25 @@ describe("guard", { timeout: TIMEOUT_MS }, () => {
     expect(clean.stderr).toContain("chained-hook-ran");
   });
 
+  test.skipIf(process.platform === "win32")(
+    "guard install does not claim a non-executable original still runs",
+    async () => {
+      const repo4 = path.join(sb.dir, "repo4");
+      fs.mkdirSync(repo4);
+      execFileSync("git", ["init", "-q"], { cwd: repo4, env: gitEnv });
+      const hook = path.join(repo4, ".git", "hooks", "pre-commit");
+      fs.mkdirSync(path.dirname(hook), { recursive: true });
+      fs.writeFileSync(hook, "#!/bin/sh\nexit 0\n");
+      fs.chmodSync(hook, 0o644);
+      const res = await sb.cli(["guard", "install"], { cwd: repo4, env: gitEnv });
+      expect(res.code, res.stderr).toBe(0);
+      expect(res.stdout).toContain(
+        "your existing hook is not executable, so git ignored it; it stays ignored",
+      );
+      expect(res.stdout).not.toContain("still runs");
+    },
+  );
+
   test("guard install refuses under core.hooksPath: exit 1, a snippet to paste, nothing written", async () => {
     const repo3 = path.join(sb.dir, "repo3");
     fs.mkdirSync(repo3);

@@ -99,19 +99,26 @@ export function findInDotenv(file: string, warn?: Warn): Finding[] {
     if (entry.line <= resumeAfter || entry.literal === undefined) continue;
     const split = splitEnvLine(lines[entry.line - 1] ?? "");
     if (split?.unclosed) {
-      // A quote that does not close here runs on over the next lines (a PEM key, say). This tool
-      // rewrites one line at a time, so it leaves the value alone and says where it is.
+      // Find where the quote closes. A PEM key, say, runs over several lines; this tool rewrites
+      // one line at a time, so it leaves such a value alone and says where it is.
       const body = [split.rest.slice(1)];
-      resumeAfter = lines.length;
-      for (let i = entry.line; i < lines.length; i++) {
+      let closedAt = 0;
+      for (let i = entry.line; i < lines.length && closedAt === 0; i++) {
         const close = closingQuote((split.quote as string) + (lines[i] as string));
         if (close !== -1) {
           body.push((lines[i] as string).slice(0, close - 1));
-          resumeAfter = i + 1;
-          break;
+          closedAt = i + 1;
+        } else {
+          body.push(lines[i] as string);
         }
-        body.push(lines[i] as string);
       }
+      if (closedAt === 0) {
+        // Never closes: not a multi-line value but a typo, and the lines after it are ordinary
+        // entries. Only this line is left alone, and the file is wrong whatever the line holds.
+        warn?.(`unclosed quote at ${file}:${entry.line}; fix the file by hand`);
+        continue;
+      }
+      resumeAfter = closedAt;
       if (classify(entry.key, body.join("\n"))) {
         const project = path.basename(path.dirname(path.resolve(file)));
         const name = sanitizeName(`env/${project}/${lowerDashes(entry.key)}`);

@@ -133,8 +133,9 @@ describe("in a git repo", () => {
     const original = Buffer.from("#!/bin/sh\r\necho original hook\r\nexit 0\r\n");
     fs.mkdirSync(path.dirname(hookPath()), { recursive: true });
     fs.writeFileSync(hookPath(), original, { mode: 0o700 });
-    const { chained } = await installHook({ cwd: repo });
+    const { chained, chainedRuns } = await installHook({ cwd: repo });
     expect(chained && path.basename(chained)).toBe(CHAINED_HOOK);
+    expect(chainedRuns).toBe(true);
     expect(fs.readFileSync(hookPath(), "utf8")).toContain(HOOK_MARKER);
     expect(fs.readFileSync(path.join(path.dirname(hookPath()), CHAINED_HOOK))).toEqual(original);
 
@@ -220,7 +221,9 @@ describe("in a git repo", () => {
       fs.rmSync(ran);
       fs.writeFileSync(hookPath(), original);
       fs.chmodSync(hookPath(), 0o644); // the file exists, so writeFileSync's mode would not apply
-      await installHook({ cwd: repo, command: ["/nonexistent/node"] });
+      expect((await installHook({ cwd: repo, command: ["/nonexistent/node"] })).chainedRuns).toBe(
+        false,
+      );
       fs.writeFileSync(path.join(repo, "t.txt"), "x\n");
       git("add", "t.txt");
       expect(commit({ PATH: BARE_PATH }).status).toBe(0);

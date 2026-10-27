@@ -43,14 +43,17 @@ export function guardCommand(program: Command): void {
     .description("add a git pre-commit hook that runs `guard check --staged`")
     .action(async () => {
       const command = embeddedCommand();
-      const { hook, chained } = await installHook({
+      const { hook, chained, chainedRuns } = await installHook({
         cwd: process.cwd(),
         ...(command && { command }),
       }).catch((err: Error) => {
         throw new CliError(err.message, err instanceof HooksPathError ? 1 : 2);
       });
       say(`installed ${hook}`);
-      if (chained) say(`your existing hook still runs after it: ${chained}`);
+      if (chained && chainedRuns) say(`your existing hook still runs after it: ${chained}`);
+      else if (chained) {
+        say("your existing hook is not executable, so git ignored it; it stays ignored");
+      }
     });
 
   guard

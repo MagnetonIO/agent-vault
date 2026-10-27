@@ -142,7 +142,13 @@ function hookScript(command: string[] | undefined): string {
   ].join("\n");
 }
 
-export type HookResult = { hook: string; chained: string | null };
+export type HookResult = {
+  hook: string;
+  /** The original hook kept beside ours, or null. */
+  chained: string | null;
+  /** False if that original is not executable: git ignored it before and ours ignores it too. */
+  chainedRuns: boolean;
+};
 
 /**
  * Write `<git-dir>/hooks/pre-commit` so `guard check --staged` runs before every commit.
@@ -171,7 +177,16 @@ export async function installHook(opts: { cwd: string; command?: string[] }): Pr
   }
   fs.writeFileSync(hook, hookScript(opts.command), { mode: 0o755 });
   fs.chmodSync(hook, 0o755);
-  return { hook, chained: kept };
+  let chainedRuns = false;
+  if (kept) {
+    try {
+      fs.accessSync(kept, fs.constants.X_OK);
+      chainedRuns = true;
+    } catch {
+      // not executable
+    }
+  }
+  return { hook, chained: kept, chainedRuns };
 }
 
 /** Remove our hook and put the original back, byte for byte. False if ours was not installed. */

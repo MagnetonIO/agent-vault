@@ -486,6 +486,21 @@ describe("multi-line dotenv values", () => {
     expect([findings, warnings]).toEqual([[], []]);
   });
 
+  test("a quote that never closes is a typo: later lines are still scanned, the line is only warned about", async () => {
+    const file = write(
+      path.join(box.cwd, ".env"),
+      'GREETING="oops\nDB_PASSWORD=hunter2-real-pw\nAPI_TOKEN=abcdef123456\n',
+    );
+    const { findings, warnings } = await warned();
+    expect(findings.map((f) => f.envName)).toEqual(["DB_PASSWORD", "API_TOKEN"]);
+    expect(warnings).toEqual([`unclosed quote at ${file}:1; fix the file by hand`]);
+    await apply(findings);
+    const lines = read(file).split("\n");
+    expect(lines[0]).toBe('GREETING="oops');
+    expect(lines[1]).toMatch(/^DB_PASSWORD=vault:\/\//);
+    expect(lines[2]).toMatch(/^API_TOKEN=vault:\/\//);
+  });
+
   test("the rewriter refuses a quote that never closes, so nothing is changed or stored", async () => {
     const file = write(path.join(box.cwd, ".env"), 'K_KEY="abc def\nrest"\n');
     const before = fileState(file);
