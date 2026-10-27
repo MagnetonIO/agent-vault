@@ -266,7 +266,7 @@ section("socket dir resolution (paths.mjs)");
   await check("path-fallback-long-home-linux", { platform: "linux", home: longHome, env: {} });
 
   // multibyte: character count under the limit, UTF-8 byte count over it
-  const mbHome = path.join(mk("h5"), "é".repeat(30));
+  const mbHome = path.join(mk("h5"), "é".repeat(20));
   const mbNormal = path.join(
     dirsFor({ env: {}, platform: "darwin", home: mbHome }).runtimeDir,
     "vaultd.sock",
