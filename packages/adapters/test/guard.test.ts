@@ -68,9 +68,17 @@ describe("scanDiff", () => {
   });
 
   test("a vault:// reference is ignored even where it looks like a key", () => {
-    expect(
-      scanDiff(`+++ b/f\n@@ -0,0 +1 @@\n+X=vault://${"a".repeat(40)}/${"b1".repeat(20)}`),
-    ).toEqual([]);
+    // The second added line is a control: it proves the file is scanned at all.
+    const hits = scanDiff(
+      [
+        "diff --git a/f b/f",
+        "+++ b/f",
+        "@@ -0,0 +1,2 @@",
+        `+X=vault://${"a".repeat(40)}/${"b1".repeat(20)}`,
+        `+Y=${PAT}`,
+      ].join("\n"),
+    );
+    expect(hits.map((h) => [h.file, h.line])).toEqual([["f", 2]]);
   });
 });
 
