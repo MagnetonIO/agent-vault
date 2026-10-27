@@ -5,6 +5,7 @@ export {
   type GuardHit,
   HOOK_MARKER,
   type HookResult,
+  HooksPathError,
   installHook,
   scanDiff,
   uninstallHook,
@@ -29,3 +30,4 @@ export {
   isRemoteHeader,
   type Sources,
 } from "./sources.js";
+export { parseWrapper, type Wrapped, wrapArgv } from "./wrap.js";

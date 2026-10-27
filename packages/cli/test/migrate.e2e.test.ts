@@ -1,7 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { installHook } from "@agent-vault/adapters";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { fakes } from "../../detect/test/fixtures/fake-keys.js";
 import { alive, CLI, makeSandbox, type Sandbox } from "./harness.js";
@@ -113,6 +112,42 @@ describe("migrate, import", { timeout: TIMEOUT_MS }, () => {
     expect(res.stdout).toContain("no plaintext secrets found");
   });
 
+  test("a multi-line value is a warning in dry-run, --json and --apply, and its file is not touched", async () => {
+    const pem = path.join(sb.dir, "pemproj");
+    const file = put(path.join(pem, ".env"), `PRIVATE_KEY="${fakes.pem()}"\n`);
+    const before = fs.readFileSync(file, "utf8");
+
+    const dry = await sb.cli(["migrate"], { cwd: pem });
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(dry.stdout).toContain("no plaintext secrets found");
+    expect(dry.stdout).toContain(
+      `multiline value at ${file}:1; move it with: agent-vault set env/pemproj/private-key`,
+    );
+
+    const json = JSON.parse((await sb.cli(["migrate", "--json"], { cwd: pem })).stdout);
+    expect(json.findings).toEqual([]);
+    expect(json.warnings).toHaveLength(1);
+
+    const applied = await sb.cli(["migrate", "--apply"], { cwd: pem });
+    expect(applied.code, applied.stderr).toBe(0);
+    expect(applied.stdout).toContain("multiline value at");
+    expect(fs.readFileSync(file, "utf8")).toBe(before);
+  });
+
+  test("--apply on a TOML config says it was reformatted, and to quit the harnesses first", async () => {
+    const toml = put(
+      path.join(sb.dir, "config.toml"),
+      `[mcp_servers.s]\ncommand = "x"\n[mcp_servers.s.env]\nS_TOKEN = "${fakes.anthropic()}"\n`,
+    );
+    const res = await sb.cli(["migrate", "--apply"], { cwd: proj });
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stdout).toMatch(/config\.toml was reformatted \(backup: .+config\.toml\)/);
+    expect(res.stdout).toContain(
+      "Quit Claude Code / Codex / OpenCode first; a running harness may rewrite its config.",
+    );
+    expect(fs.readFileSync(toml, "utf8")).toContain("agent-vault");
+  });
+
   test("import migrates one dotenv file, and only with --apply", async () => {
     const other = put(
       path.join(sb.dir, "elsewhere", "prod.env"),
@@ -205,27 +240,48 @@ describe("guard", { timeout: TIMEOUT_MS }, () => {
     expect(res.code).toBe(2);
   });
 
-  test("the installed hook blocks a commit with a secret and lets a clean one through", async () => {
+  test("the hook installed by the CLI blocks a commit with a secret, even with agent-vault off PATH", async () => {
     const hooks = path.join(repo, ".git", "hooks");
     const chain = path.join(hooks, "pre-commit");
     fs.mkdirSync(hooks, { recursive: true });
     fs.writeFileSync(chain, "#!/bin/sh\necho chained-hook-ran >&2\n", { mode: 0o755 });
 
-    // The hook starts this build of the CLI, not an `agent-vault` on PATH.
-    await installHook({ cwd: repo, command: [process.execPath, CLI] });
+    const installed = await sb.cli(["guard", "install"], { cwd: repo, env: gitEnv });
+    expect(installed.code, installed.stderr).toBe(0);
+    // The hook records this build's node and entry script, so PATH is not needed.
+    expect(fs.readFileSync(chain, "utf8")).toContain(CLI.replaceAll("\\", "/"));
+    const commitEnv = process.platform === "win32" ? gitEnv : { ...gitEnv, PATH: "/usr/bin:/bin" };
+    const commit = (message: string) =>
+      spawnSync(
+        "git",
+        ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", message],
+        { cwd: repo, env: commitEnv, encoding: "utf8" },
+      );
+
     git("add", "a.txt");
-    expect(() => git("commit", "-q", "-m", "secret")).toThrow(/possible secret/);
+    const blocked = commit("secret");
+    expect(blocked.status).not.toBe(0);
+    expect(blocked.stderr).toMatch(/possible secret/);
+    expect(blocked.stderr).not.toContain("chained-hook-ran");
 
     put(path.join(repo, "a.txt"), "hello\n");
     git("add", "a.txt");
-    const clean = spawnSync(
-      "git",
-      ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "clean"],
-      { cwd: repo, env: gitEnv, encoding: "utf8" },
-    );
+    const clean = commit("clean");
     expect(clean.status, clean.stderr).toBe(0);
     // the hook that was there before ours still runs
     expect(clean.stderr).toContain("chained-hook-ran");
+  });
+
+  test("guard install refuses under core.hooksPath: exit 1, a snippet to paste, nothing written", async () => {
+    const repo3 = path.join(sb.dir, "repo3");
+    fs.mkdirSync(repo3);
+    execFileSync("git", ["init", "-q"], { cwd: repo3, env: gitEnv });
+    execFileSync("git", ["config", "core.hooksPath", ".githooks"], { cwd: repo3, env: gitEnv });
+    const res = await sb.cli(["guard", "install"], { cwd: repo3, env: gitEnv });
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain("agent-vault guard check --staged");
+    expect(fs.existsSync(path.join(repo3, ".githooks"))).toBe(false);
+    expect(fs.existsSync(path.join(repo3, ".git", "hooks", "pre-commit"))).toBe(false);
   });
 
   test("guard install / uninstall through the CLI chain and restore the existing hook", async () => {

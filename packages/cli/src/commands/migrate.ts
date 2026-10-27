@@ -14,7 +14,7 @@ import { fingerprint } from "@agent-vault/detect";
 import type { Command } from "commander";
 import { withDaemon } from "../context.js";
 import { CliError } from "../errors.js";
-import { say, table, warn } from "../output.js";
+import { say, table } from "../output.js";
 
 const KINDS: FindingKind[] = [
   "dotenv",
@@ -45,14 +45,14 @@ function countsByKind(findings: Finding[]): Record<string, number> {
   return counts;
 }
 
-async function report(findings: Finding[], opts: Options): Promise<void> {
+async function report(findings: Finding[], warnings: string[], opts: Options): Promise<void> {
   const actionable = findings.filter((f) => !isRemoteHeader(f.kind));
   let applied: MigrationResult | undefined;
   if (opts.apply && findings.length > 0) {
     applied =
       actionable.length > 0
         ? await withDaemon((client) => applyMigration(findings, client))
-        : { migrated: 0, listedForPhase2: findings.length, backups: [] };
+        : { migrated: 0, listedForPhase2: findings.length, backups: [], reformatted: [] };
   }
 
   if (opts.json) {
@@ -62,6 +62,7 @@ async function report(findings: Finding[], opts: Options): Promise<void> {
           dryRun: !opts.apply,
           counts: countsByKind(findings),
           findings: findings.map(describe),
+          warnings,
           ...(applied && { applied }),
         },
         null,
@@ -71,8 +72,15 @@ async function report(findings: Finding[], opts: Options): Promise<void> {
     return;
   }
 
+  const printWarnings = () => {
+    if (warnings.length === 0) return;
+    say();
+    say("warnings:");
+    for (const w of warnings) say(`  ${w}`);
+  };
   if (findings.length === 0) {
     say("no plaintext secrets found");
+    printWarnings();
     return;
   }
   const counts = countsByKind(findings);
@@ -87,6 +95,7 @@ async function report(findings: Finding[], opts: Options): Promise<void> {
   for (const line of table(findings.map((f) => [f.file, f.locator, fingerprint(f.detection)]))) {
     say(line);
   }
+  printWarnings();
   say();
 
   if (!applied) {
@@ -103,13 +112,18 @@ async function report(findings: Finding[], opts: Options): Promise<void> {
     );
     for (const b of applied.backups) say(`  ${b}`);
   }
+  for (const r of applied.reformatted) {
+    say(`${path.basename(r.file)} was reformatted (backup: ${r.backup})`);
+  }
+  say("Quit Claude Code / Codex / OpenCode first; a running harness may rewrite its config.");
 }
 
-const sources = () => ({
+/** Collects what the scan skipped or could not handle, to print with the findings. */
+const sources = (warnings: string[]) => ({
   home: os.homedir(),
   cwd: process.cwd(),
   ...(process.env.CODEX_HOME && { codexHome: process.env.CODEX_HOME }),
-  warn,
+  warn: (message: string) => void warnings.push(message),
 });
 
 export function migrateCommand(program: Command): void {
@@ -119,7 +133,8 @@ export function migrateCommand(program: Command): void {
     .option("--apply", "store the secrets and rewrite the files (without it nothing is written)")
     .option("--json", "print the findings as JSON (fingerprints only)")
     .action(async (opts: Options) => {
-      await report(await findPlaintextSecrets(sources()), opts);
+      const warnings: string[] = [];
+      await report(await findPlaintextSecrets(sources(warnings)), warnings, opts);
     });
 }
 
@@ -133,7 +148,12 @@ export function importCommand(program: Command): void {
     .action(async (file: string, opts: Options) => {
       const abs = path.resolve(file);
       if (!isFile(abs)) throw new CliError(`${abs} is not a file`, 2);
-      await report(findInDotenv(abs, warn), opts);
+      const warnings: string[] = [];
+      await report(
+        findInDotenv(abs, (m) => void warnings.push(m)),
+        warnings,
+        opts,
+      );
     });
 }
 

@@ -4,6 +4,9 @@ import { parseEnvFile } from "@agent-vault/core";
 import { type Detection, detectSecrets } from "@agent-vault/detect";
 import { type ParseError, parse as parseJsonc } from "jsonc-parser";
 import { parse as parseToml } from "smol-toml";
+import { closingQuote, splitEnvLine } from "./dotenv.js";
+import { lowerDashes, sanitizeName } from "./names.js";
+import { parseWrapper } from "./wrap.js";
 
 export type FindingKind =
   | "dotenv"
@@ -14,9 +17,11 @@ export type FindingKind =
   | "claude-remote-header";
 
 /**
- * One plaintext secret. `locator` says where it sits: `line <n>` in a dotenv file, otherwise
- * `<section>.<server>.<field>.<name>` (`mcpServers.github.env.GITHUB_TOKEN`). `envName` is the
- * variable or header name. `detection.value` IS the secret: keep findings in memory, never print.
+ * One plaintext secret. `locator` says where it sits, for people: `line <n>` in a dotenv file,
+ * otherwise the dotted path (`mcpServers.github.env.GITHUB_TOKEN`). `jsonPath` is the same place
+ * as segments, for edits (project paths hold dots and slashes); it is empty for dotenv. `envName`
+ * is the variable or header name. `detection.value` IS the secret: keep findings in memory, never
+ * print them.
  */
 export type Finding = {
   file: string;
@@ -24,6 +29,7 @@ export type Finding = {
   locator: string;
   envName: string;
   detection: Detection;
+  jsonPath: (string | number)[];
 };
 
 export type Sources = {
@@ -31,9 +37,11 @@ export type Sources = {
   cwd: string;
   /** `$CODEX_HOME`; `<home>/.codex` when unset. */
   codexHome?: string | undefined;
-  /** Told about a file that exists but cannot be read or parsed, so a miss is never silent. */
+  /** Told about anything that was skipped or needs a person, so a miss is never silent. */
   warn?: ((message: string) => void) | undefined;
 };
+
+type Warn = Sources["warn"];
 
 /** Header findings are only listed for the later, proxy-based phase; nothing rewrites them. */
 export const isRemoteHeader = (kind: FindingKind): boolean =>
@@ -59,11 +67,11 @@ export function classify(name: string, value: string): Detection | null {
   return { ruleId: "key-name", value, start: 0, end: value.length, suggestedName: "" };
 }
 
-/** The file's text, or null if it is absent. A symlink to a file counts as the file. */
-function readText(file: string, warn?: Sources["warn"]): string | null {
+/** The file's text without a byte order mark, or null if it is absent. Symlinks are followed. */
+function readText(file: string, warn?: Warn): string | null {
   try {
     if (!fs.statSync(file).isFile()) return null;
-    return fs.readFileSync(file, "utf8");
+    return fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
       warn?.(`skipped ${file}: ${(err as Error).message}`);
@@ -80,12 +88,37 @@ function stringEntries(table: unknown): [string, string][] {
   return Object.entries(table).filter((e): e is [string, string] => typeof e[1] === "string");
 }
 
-export function findInDotenv(file: string, warn?: Sources["warn"]): Finding[] {
+export function findInDotenv(file: string, warn?: Warn): Finding[] {
   const text = readText(file, warn);
   if (text === null) return [];
+  const lines = text.split(/\r\n|\r|\n/);
   const out: Finding[] = [];
+  // Lines up to here are the body of an earlier multi-line value, not entries of their own.
+  let resumeAfter = 0;
   for (const entry of parseEnvFile(text)) {
-    if (entry.literal === undefined) continue;
+    if (entry.line <= resumeAfter || entry.literal === undefined) continue;
+    const split = splitEnvLine(lines[entry.line - 1] ?? "");
+    if (split?.unclosed) {
+      // A quote that does not close here runs on over the next lines (a PEM key, say). This tool
+      // rewrites one line at a time, so it leaves the value alone and says where it is.
+      const body = [split.rest.slice(1)];
+      resumeAfter = lines.length;
+      for (let i = entry.line; i < lines.length; i++) {
+        const close = closingQuote((split.quote as string) + (lines[i] as string));
+        if (close !== -1) {
+          body.push((lines[i] as string).slice(0, close - 1));
+          resumeAfter = i + 1;
+          break;
+        }
+        body.push(lines[i] as string);
+      }
+      if (classify(entry.key, body.join("\n"))) {
+        const project = path.basename(path.dirname(path.resolve(file)));
+        const name = sanitizeName(`env/${project}/${lowerDashes(entry.key)}`);
+        warn?.(`multiline value at ${file}:${entry.line}; move it with: agent-vault set ${name}`);
+      }
+      continue;
+    }
     const detection = classify(entry.key, entry.literal);
     if (detection) {
       out.push({
@@ -94,6 +127,7 @@ export function findInDotenv(file: string, warn?: Sources["warn"]): Finding[] {
         locator: `line ${entry.line}`,
         envName: entry.key,
         detection,
+        jsonPath: [],
       });
     }
   }
@@ -114,42 +148,59 @@ function dotenvFiles(cwd: string): string[] {
 }
 
 type McpShape = {
-  section: string;
   /** Where a stdio server keeps its environment. */
   envField: string;
   stdioKind: FindingKind;
   remoteKind: FindingKind;
-  /** The program a stdio server starts: a string, or the first item of a command array. */
-  hasCommand(server: Record<string, unknown>): boolean;
+  /** `[command, ...args]` of a stdio server; empty if it has no command. */
+  argvOf(server: Record<string, unknown>): unknown[];
   isRemote(server: Record<string, unknown>): boolean;
 };
 
 const CLAUDE_SHAPE: McpShape = {
-  section: "mcpServers",
   envField: "env",
   stdioKind: "claude-mcp",
   remoteKind: "claude-remote-header",
-  hasCommand: (s) => typeof s.command === "string" && s.command !== "",
+  argvOf: (s) =>
+    typeof s.command === "string" && s.command !== ""
+      ? [s.command, ...(Array.isArray(s.args) ? s.args : [])]
+      : [],
   isRemote: (s) => s.type === "http" || s.type === "sse" || typeof s.url === "string",
 };
 
 const OPENCODE_SHAPE: McpShape = {
-  section: "mcp",
   envField: "environment",
   stdioKind: "opencode-mcp",
   remoteKind: "opencode-remote-header",
-  hasCommand: (s) => Array.isArray(s.command) && typeof s.command[0] === "string",
+  argvOf: (s) => (Array.isArray(s.command) && typeof s.command[0] === "string" ? s.command : []),
   isRemote: (s) => s.type === "remote",
 };
 
-function findInServers(file: string, root: unknown, shape: McpShape): Finding[] {
-  const servers = isRecord(root) ? root[shape.section] : undefined;
+/** Secrets in the servers under `container` (a path into the parsed file). */
+function findInServers(
+  file: string,
+  root: unknown,
+  container: string[],
+  shape: McpShape,
+  warn?: Warn,
+): Finding[] {
+  let servers: unknown = root;
+  for (const key of container) servers = isRecord(servers) ? servers[key] : undefined;
   if (!isRecord(servers)) return [];
   const out: Finding[] = [];
   for (const [server, def] of Object.entries(servers)) {
     if (!isRecord(def)) continue;
     const remote = shape.isRemote(def);
-    if (!remote && !shape.hasCommand(def)) continue;
+    if (!remote) {
+      const argv = shape.argvOf(def);
+      if (argv.length === 0) continue;
+      if (parseWrapper(argv).kind === "mcp") {
+        warn?.(
+          `${file}: ${server} runs agent-vault itself; move its secrets with: agent-vault set`,
+        );
+        continue;
+      }
+    }
     const field = remote ? "headers" : shape.envField;
     for (const [name, value] of stringEntries(def[field])) {
       const detection = classify(name, value);
@@ -157,16 +208,23 @@ function findInServers(file: string, root: unknown, shape: McpShape): Finding[] 
       out.push({
         file,
         kind: remote ? shape.remoteKind : shape.stdioKind,
-        locator: `${shape.section}.${server}.${field}.${name}`,
+        locator: [...container, server, field, name].join("."),
         envName: name,
         detection,
+        jsonPath: [...container, server, field, name],
       });
     }
   }
   return out;
 }
 
-function findInJson(file: string, shape: McpShape, warn?: Sources["warn"]): Finding[] {
+function findInJson(
+  file: string,
+  shape: McpShape,
+  containerKey: string,
+  opts: { projects: boolean },
+  warn?: Warn,
+): Finding[] {
   const text = readText(file, warn);
   if (text === null) return [];
   const errors: ParseError[] = [];
@@ -175,10 +233,18 @@ function findInJson(file: string, shape: McpShape, warn?: Sources["warn"]): Find
     warn?.(`skipped ${file}: not valid JSON`);
     return [];
   }
-  return findInServers(file, root, shape);
+  const out = findInServers(file, root, [containerKey], shape, warn);
+  // Claude Code keeps per-project servers under projects.<absolute path>.mcpServers.
+  const projects = opts.projects && isRecord(root) ? root.projects : undefined;
+  if (isRecord(projects)) {
+    for (const project of Object.keys(projects)) {
+      out.push(...findInServers(file, root, ["projects", project, containerKey], shape, warn));
+    }
+  }
+  return out;
 }
 
-function findInCodexToml(file: string, warn?: Sources["warn"]): Finding[] {
+function findInCodexToml(file: string, warn?: Warn): Finding[] {
   const text = readText(file, warn);
   if (text === null) return [];
   let root: unknown;
@@ -188,26 +254,10 @@ function findInCodexToml(file: string, warn?: Sources["warn"]): Finding[] {
     warn?.(`skipped ${file}: not valid TOML`);
     return [];
   }
-  const servers = isRecord(root) ? root.mcp_servers : undefined;
-  if (!isRecord(servers)) return [];
-  const out: Finding[] = [];
-  for (const [server, def] of Object.entries(servers)) {
-    if (!isRecord(def) || typeof def.command !== "string" || def.command === "") continue;
-    for (const [name, value] of stringEntries(def.env)) {
-      const detection = classify(name, value);
-      if (detection) {
-        out.push({
-          file,
-          kind: "codex-mcp",
-          locator: `mcp_servers.${server}.env.${name}`,
-          envName: name,
-          detection,
-        });
-      }
-    }
-  }
-  return out;
+  return findInServers(file, root, ["mcp_servers"], CODEX_SHAPE, warn);
 }
+
+const CODEX_SHAPE: McpShape = { ...CLAUDE_SHAPE, stdioKind: "codex-mcp", isRemote: () => false };
 
 export const codexHomeOf = (s: Pick<Sources, "home" | "codexHome">): string =>
   s.codexHome || path.join(s.home, ".codex");
@@ -223,10 +273,28 @@ export async function findPlaintextSecrets(sources: Sources): Promise<Finding[]>
   const { home, cwd, warn } = sources;
   const out: Finding[] = [];
   for (const file of dotenvFiles(cwd)) out.push(...findInDotenv(file, warn));
-  out.push(...findInJson(path.join(cwd, ".mcp.json"), CLAUDE_SHAPE, warn));
-  out.push(...findInJson(path.join(home, ".claude.json"), CLAUDE_SHAPE, warn));
+  out.push(
+    ...findInJson(
+      path.join(cwd, ".mcp.json"),
+      CLAUDE_SHAPE,
+      "mcpServers",
+      { projects: false },
+      warn,
+    ),
+  );
+  out.push(
+    ...findInJson(
+      path.join(home, ".claude.json"),
+      CLAUDE_SHAPE,
+      "mcpServers",
+      { projects: true },
+      warn,
+    ),
+  );
   out.push(...findInCodexToml(path.join(codexHomeOf(sources), "config.toml"), warn));
-  for (const file of opencodeConfigs(sources)) out.push(...findInJson(file, OPENCODE_SHAPE, warn));
+  for (const file of opencodeConfigs(sources)) {
+    out.push(...findInJson(file, OPENCODE_SHAPE, "mcp", { projects: false }, warn));
+  }
   return out;
 }
 

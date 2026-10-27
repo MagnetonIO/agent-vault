@@ -11,6 +11,7 @@ import {
   type Finding,
   findPlaintextSecrets,
   sanitizeName,
+  wrapArgv,
 } from "../src/index.js";
 import { stamp, useBox } from "./helpers.js";
 
@@ -265,7 +266,7 @@ describe("applyMigration", () => {
     const again = await find();
     expect(again.filter((f) => f.kind !== "opencode-remote-header")).toEqual([]);
     const second = await apply(again);
-    expect(second).toEqual({ migrated: 0, listedForPhase2: 1, backups: [] });
+    expect(second).toEqual({ migrated: 0, listedForPhase2: 1, backups: [], reformatted: [] });
     expect(Object.values(files).map(fileState)).toEqual(after);
   });
 
@@ -287,7 +288,7 @@ describe("applyMigration", () => {
     );
     const before = read(file);
     const result = await apply(await find());
-    expect(result).toEqual({ migrated: 0, listedForPhase2: 1, backups: [] });
+    expect(result).toEqual({ migrated: 0, listedForPhase2: 1, backups: [], reformatted: [] });
     expect(read(file)).toBe(before);
     expect(await names()).toEqual([]);
   });
@@ -409,6 +410,7 @@ describe("applyMigration", () => {
     );
     await expect(apply(await find())).rejects.toThrow(/environment variable name/);
     expect(await names()).toEqual([]);
+    expect(fs.existsSync(box.paths.backupsDir)).toBe(false);
   });
 });
 
@@ -432,5 +434,240 @@ describe("sanitizeName / backupFile", () => {
     const a = backupFile(file, box.paths.backupsDir, now);
     const b = backupFile(file, box.paths.backupsDir, now);
     expect(a).not.toBe(b);
+  });
+});
+
+describe("multi-line dotenv values", () => {
+  const apply = (findings: Finding[]) =>
+    applyMigration(findings, box.client, { backupsDir: box.paths.backupsDir });
+  const warned = async () => {
+    const warnings: string[] = [];
+    const findings = await findPlaintextSecrets({ ...sources(), warn: (m) => warnings.push(m) });
+    return { findings, warnings };
+  };
+
+  test("a quoted PEM key is a warning, not a finding, and --apply leaves the file alone", async () => {
+    const file = write(path.join(box.cwd, ".env"), `PRIVATE_KEY="${fakes.pem()}"\nPLAIN=1\n`);
+    const before = fileState(file);
+    const { findings, warnings } = await warned();
+    expect(findings).toEqual([]);
+    expect(warnings).toEqual([
+      `multiline value at ${file}:1; move it with: agent-vault set env/proj/private-key`,
+    ]);
+    expect(await apply(findings)).toEqual({
+      migrated: 0,
+      listedForPhase2: 0,
+      backups: [],
+      reformatted: [],
+    });
+    expect(fileState(file)).toEqual(before);
+    expect(await names()).toEqual([]);
+  });
+
+  test("the body of a multi-line value is not read as entries, and later lines still are", async () => {
+    const pat = fakes.githubPat();
+    write(
+      path.join(box.cwd, ".env"),
+      `NOTE_KEY='first line\nINNER_TOKEN=${fakes.openai()}\nlast line'\nB_TOKEN=${pat}\n`,
+    );
+    const { findings, warnings } = await warned();
+    expect(findings.map((f) => f.envName)).toEqual(["B_TOKEN"]);
+    expect(findings[0]?.locator).toBe("line 4");
+    expect(warnings).toHaveLength(1);
+    await apply(findings);
+    expect(read(path.join(box.cwd, ".env"))).toMatch(
+      /^NOTE_KEY='first line\nINNER_TOKEN=.*\nlast line'\nB_TOKEN=vault:\/\//,
+    );
+  });
+
+  test("an unclosed multi-line value that holds nothing secret is not even a warning", async () => {
+    write(path.join(box.cwd, ".env"), 'MOTD="hello\nworld"\n');
+    const { findings, warnings } = await warned();
+    expect([findings, warnings]).toEqual([[], []]);
+  });
+
+  test("the rewriter refuses a quote that never closes, so nothing is changed or stored", async () => {
+    const file = write(path.join(box.cwd, ".env"), 'K_KEY="abc def\nrest"\n');
+    const before = fileState(file);
+    const handmade: Finding = {
+      file,
+      kind: "dotenv",
+      locator: "line 1",
+      envName: "K_KEY",
+      detection: { ruleId: "key-name", value: "abc def", start: 0, end: 7, suggestedName: "" },
+      jsonPath: [],
+    };
+    await expect(apply([handmade])).rejects.toThrow(/never closes/);
+    expect(fileState(file)).toEqual(before);
+    expect(await names()).toEqual([]);
+    expect(fs.existsSync(box.paths.backupsDir)).toBe(false);
+  });
+});
+
+describe("project-scoped and already-wrapped servers", () => {
+  const apply = async (findings: Finding[]) =>
+    applyMigration(findings, box.client, { backupsDir: box.paths.backupsDir });
+  const PAT = fakes.githubPat();
+  const OPENAI = fakes.openai();
+  const DOTTED = "/Users/me/my.app/v1.2";
+
+  const claudeJson = () =>
+    write(
+      path.join(box.home, ".claude.json"),
+      JSON.stringify(
+        {
+          projects: {
+            [DOTTED]: {
+              mcpServers: { gh: { command: "npx", args: ["x"], env: { A_TOKEN: PAT } } },
+            },
+            "/other": { mcpServers: { gh: { command: "npx", env: { A_TOKEN: OPENAI } } } },
+            "/same/value": { mcpServers: { gh: { command: "npx", env: { A_TOKEN: PAT } } } },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+  test("servers under projects.<path>.mcpServers are found with a structured path", async () => {
+    claudeJson();
+    const findings = await find();
+    expect(findings.map((f) => f.jsonPath)).toEqual([
+      ["projects", DOTTED, "mcpServers", "gh", "env", "A_TOKEN"],
+      ["projects", "/other", "mcpServers", "gh", "env", "A_TOKEN"],
+      ["projects", "/same/value", "mcpServers", "gh", "env", "A_TOKEN"],
+    ]);
+    expect(findings[0]?.locator).toBe(`projects.${DOTTED}.mcpServers.gh.env.A_TOKEN`);
+  });
+
+  test("they are migrated; same-named servers share a bundle unless their secrets differ", async () => {
+    const file = claudeJson();
+    const result = await apply(await find());
+    expect(result.migrated).toBe(3);
+    const projects = JSON.parse(read(file)).projects;
+    expect(projects[DOTTED].mcpServers.gh).toEqual({
+      command: "agent-vault",
+      args: ["run", "--bundle", "mcp-gh", "--", "npx", "x"],
+    });
+    expect(projects["/other"].mcpServers.gh.args).toEqual([
+      "run",
+      "--bundle",
+      "mcp-gh-2",
+      "--",
+      "npx",
+    ]);
+    expect(projects["/same/value"].mcpServers.gh.args.slice(0, 3)).toEqual([
+      "run",
+      "--bundle",
+      "mcp-gh",
+    ]);
+    expect(await names()).toEqual(["mcp/gh/a-token", "mcp/gh/a-token-2"]);
+    expect((await bundles()).map((b) => [b.name, b.env]).sort()).toEqual([
+      ["mcp-gh", { A_TOKEN: "mcp/gh/a-token" }],
+      ["mcp-gh-2", { A_TOKEN: "mcp/gh/a-token-2" }],
+    ]);
+    for (const v of [PAT, OPENAI]) expect(read(file)).not.toContain(v);
+  });
+
+  test("commands that already run through agent-vault are not wrapped again", async () => {
+    const file = write(
+      path.join(box.home, ".claude.json"),
+      JSON.stringify({
+        mcpServers: {
+          long: {
+            command: "agent-vault",
+            args: ["run", "--bundle=b1", "--", "x"],
+            env: { A_TOKEN: PAT },
+          },
+          short: {
+            command: "/usr/local/bin/agent-vault",
+            args: ["run", "-b", "b2", "--", "x"],
+            env: { B_TOKEN: OPENAI },
+          },
+          bare: {
+            command: "agent-vault",
+            args: ["run", "--", "x"],
+            env: { C_TOKEN: fakes.slack() },
+          },
+          own: { command: "agent-vault", args: ["mcp"], env: { D_TOKEN: fakes.anthropic() } },
+        },
+      }),
+    );
+    const warnings: string[] = [];
+    const findings = await findPlaintextSecrets({ ...sources(), warn: (m) => warnings.push(m) });
+    expect(findings.map((f) => f.envName)).toEqual(["A_TOKEN", "B_TOKEN", "C_TOKEN"]);
+    expect(warnings).toEqual([expect.stringContaining("own runs agent-vault itself")]);
+    await apply(findings);
+    const s = JSON.parse(read(file)).mcpServers;
+    expect(s.long).toEqual({ command: "agent-vault", args: ["run", "--bundle=b1", "--", "x"] });
+    expect(s.short).toEqual({
+      command: "/usr/local/bin/agent-vault",
+      args: ["run", "-b", "b2", "--", "x"],
+    });
+    expect(s.bare).toEqual({
+      command: "agent-vault",
+      args: ["run", "--bundle", "mcp-bare", "--", "x"],
+    });
+    expect((await bundles()).map((b) => b.name).sort()).toEqual(["b1", "b2", "mcp-bare"]);
+  });
+
+  test("wrapArgv wraps once", () => {
+    const once = wrapArgv(["npx", "-y", "p"], "mcp-p");
+    expect(once).toEqual(["agent-vault", "run", "--bundle", "mcp-p", "--", "npx", "-y", "p"]);
+    expect(wrapArgv(once, "other")).toBe(once);
+  });
+
+  test("a byte order mark is read through, and kept", async () => {
+    const mcp = write(
+      path.join(box.cwd, ".mcp.json"),
+      `﻿${JSON.stringify({ mcpServers: { a: { command: "x", env: { A_TOKEN: PAT } } } })}`,
+    );
+    const oc = write(
+      path.join(box.cwd, "opencode.json"),
+      `﻿{ "mcp": { "b": { "type": "local", "command": ["y"], "environment": { "B_TOKEN": "${OPENAI}" } } } }`,
+    );
+    const findings = await find();
+    expect(findings).toHaveLength(2);
+    await apply(findings);
+    for (const f of [mcp, oc]) {
+      expect(read(f).startsWith("﻿")).toBe(true);
+      expect(read(f)).toContain("agent-vault");
+    }
+  });
+
+  test("a very long server name gets a capped bundle name ending in a hash", async () => {
+    const server = `srv-${"x".repeat(200)}`;
+    const file = write(
+      path.join(box.home, ".claude.json"),
+      JSON.stringify({ mcpServers: { [server]: { command: "x", env: { A_TOKEN: PAT } } } }),
+    );
+    await apply(await find());
+    const bundle = (await bundles())[0]?.name ?? "";
+    expect(bundle.length).toBeLessThanOrEqual(128);
+    expect(bundle).toMatch(/^mcp-srv-x+-[0-9a-f]{8}$/);
+    expect(JSON.parse(read(file)).mcpServers[server].args[2]).toBe(bundle);
+    expect((await names())[0]?.length).toBeLessThanOrEqual(128);
+  });
+
+  test("every file is checked before the first is touched", async () => {
+    const good = write(path.join(box.cwd, ".env"), `A_TOKEN=${PAT}\n`);
+    write(
+      path.join(box.home, ".claude.json"),
+      JSON.stringify({ mcpServers: { a: { command: "x", env: { "BAD.TOKEN": OPENAI } } } }),
+    );
+    const before = fileState(good);
+    await expect(apply(await find())).rejects.toThrow(/environment variable name/);
+    expect(fileState(good)).toEqual(before);
+    expect(await names()).toEqual([]);
+    expect(fs.existsSync(box.paths.backupsDir)).toBe(false);
+  });
+
+  test("a rewritten TOML file is reported as reformatted, with its backup", async () => {
+    const toml = write(
+      path.join(box.codexHome, "config.toml"),
+      `[mcp_servers.s]\ncommand = "x"\n[mcp_servers.s.env]\nA_TOKEN = "${PAT}"\n`,
+    );
+    const result = await apply(await find());
+    expect(result.reformatted).toEqual([{ file: toml, backup: result.backups[0] }]);
   });
 });

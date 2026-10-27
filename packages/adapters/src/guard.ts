@@ -73,9 +73,32 @@ export async function checkDiff(opts: { cwd: string; staged: boolean }): Promise
     "--no-color",
     "--no-ext-diff",
     "--no-textconv",
+    // diff.noprefix / diff.mnemonicPrefix would change the `+++ b/<file>` headers read below.
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
   ];
   if (opts.staged) args.push("--cached");
   return scanDiff(await git(opts.cwd, args));
+}
+
+/** `core.hooksPath` thwarts a hook in `.git/hooks`: the hook manager that set it owns the dir. */
+export class HooksPathError extends Error {
+  readonly hooksPath: string;
+  constructor(hooksPath: string) {
+    super(
+      `core.hooksPath is set (${hooksPath}), so no hook was installed. Add this line to your hook manager's pre-commit: agent-vault guard check --staged`,
+    );
+    this.name = "HooksPathError";
+    this.hooksPath = hooksPath;
+  }
+}
+
+async function hooksPathSetting(cwd: string): Promise<string> {
+  try {
+    return (await git(cwd, ["config", "--get", "core.hooksPath"])).trim();
+  } catch {
+    return ""; // `git config --get` exits 1 when the key is unset
+  }
 }
 
 async function hooksDir(cwd: string): Promise<string> {
@@ -86,13 +109,35 @@ async function hooksDir(cwd: string): Promise<string> {
 /** A path for a `sh` script: forward slashes, which Git for Windows' sh reads too. */
 const shQuote = (s: string): string => `"${s.replace(/\\/g, "/").replace(/(["$`])/g, "\\$1")}"`;
 
-function hookScript(command: string[]): string {
+/**
+ * The hook. It runs agent-vault from the path recorded at install if that still exists, else from
+ * PATH; if neither is there it says so on stderr and lets the commit through (fail open, loudly).
+ * An original hook that was moved aside runs afterwards, if it is executable as git requires.
+ */
+function hookScript(command: string[] | undefined): string {
+  const run = "guard check --staged || exit 1";
+  const body: string[] = [];
+  if (command && command.length > 0) {
+    const tests = command.map((p, i) => `[ ${i === 0 ? "-x" : "-f"} ${shQuote(p)} ]`);
+    body.push(`if ${tests.join(" && ")}; then`, `  ${command.map(shQuote).join(" ")} ${run}`);
+    body.push("elif command -v agent-vault >/dev/null 2>&1; then");
+  } else {
+    body.push("if command -v agent-vault >/dev/null 2>&1; then");
+  }
+  body.push(
+    `  agent-vault ${run}`,
+    "else",
+    '  echo "agent-vault guard: agent-vault not found; commit NOT checked" >&2',
+    "fi",
+  );
   return [
     "#!/bin/sh",
     `${HOOK_MARKER} (remove with: agent-vault guard uninstall)`,
-    `${command.map(shQuote).join(" ")} guard check --staged || exit 1`,
-    `chained="$(dirname "$0")/${CHAINED_HOOK}"`,
-    `if [ -f "$chained" ]; then exec "$chained" "$@"; fi`,
+    'hookdir=$(dirname "$0")',
+    ...body,
+    `if [ -x "$hookdir/${CHAINED_HOOK}" ]; then`,
+    `  exec "$hookdir/${CHAINED_HOOK}" "$@"`,
+    "fi",
     "",
   ].join("\n");
 }
@@ -100,12 +145,16 @@ function hookScript(command: string[]): string {
 export type HookResult = { hook: string; chained: string | null };
 
 /**
- * Write `<git-dir>/hooks/pre-commit` so `guard check --staged` runs before every commit. A hook
- * that is already there is moved to `pre-commit.agent-vault-orig` and runs after ours.
- * `command` is how the hook starts agent-vault (a program and leading arguments).
+ * Write `<git-dir>/hooks/pre-commit` so `guard check --staged` runs before every commit.
+ * `command` is where agent-vault lives (a program and its script, as absolute paths); without it
+ * the hook looks on PATH. A hook that is already there is renamed to `pre-commit.agent-vault-orig`
+ * (mode and bytes untouched, so uninstall restores it exactly) and ours runs it afterwards; if it
+ * was not executable, git ignored it and so does ours. Refuses when `core.hooksPath` is set.
  */
 export async function installHook(opts: { cwd: string; command?: string[] }): Promise<HookResult> {
   const dir = await hooksDir(opts.cwd);
+  const configured = await hooksPathSetting(opts.cwd);
+  if (configured !== "") throw new HooksPathError(configured);
   const hook = path.join(dir, "pre-commit");
   const chained = path.join(dir, CHAINED_HOOK);
   fs.mkdirSync(dir, { recursive: true });
@@ -120,13 +169,14 @@ export async function installHook(opts: { cwd: string; command?: string[] }): Pr
   } else if (fs.existsSync(chained)) {
     kept = chained;
   }
-  fs.writeFileSync(hook, hookScript(opts.command ?? ["agent-vault"]), { mode: 0o755 });
+  fs.writeFileSync(hook, hookScript(opts.command), { mode: 0o755 });
   fs.chmodSync(hook, 0o755);
   return { hook, chained: kept };
 }
 
 /** Remove our hook and put the original back, byte for byte. False if ours was not installed. */
 export async function uninstallHook(opts: { cwd: string }): Promise<boolean> {
+  if ((await hooksPathSetting(opts.cwd)) !== "") return false; // never installed there
   const dir = await hooksDir(opts.cwd);
   const hook = path.join(dir, "pre-commit");
   const chained = path.join(dir, CHAINED_HOOK);

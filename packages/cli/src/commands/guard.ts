@@ -1,7 +1,21 @@
-import { checkDiff, installHook, uninstallHook } from "@agent-vault/adapters";
+import fs from "node:fs";
+import { isSea } from "node:sea";
+import { checkDiff, HooksPathError, installHook, uninstallHook } from "@agent-vault/adapters";
 import type { Command } from "commander";
 import { CliError, exitWith } from "../errors.js";
 import { say, warn } from "../output.js";
+
+/**
+ * How this process was started, as absolute paths, so a hook can run the same agent-vault later
+ * without PATH: the single-file binary, or node plus the entry script. Undefined when neither is
+ * known (running from source), and the hook then falls back to PATH.
+ */
+function embeddedCommand(): string[] | undefined {
+  if (isSea()) return [process.execPath];
+  const entry = process.argv[1];
+  if (!entry || !/\.[cm]?js$/.test(entry) || !fs.existsSync(entry)) return undefined;
+  return [process.execPath, fs.realpathSync(entry)];
+}
 
 export function guardCommand(program: Command): void {
   const guard = program.command("guard").description("stop secrets from being committed to git");
@@ -28,8 +42,12 @@ export function guardCommand(program: Command): void {
     .command("install")
     .description("add a git pre-commit hook that runs `guard check --staged`")
     .action(async () => {
-      const { hook, chained } = await installHook({ cwd: process.cwd() }).catch((err: Error) => {
-        throw new CliError(err.message, 2);
+      const command = embeddedCommand();
+      const { hook, chained } = await installHook({
+        cwd: process.cwd(),
+        ...(command && { command }),
+      }).catch((err: Error) => {
+        throw new CliError(err.message, err instanceof HooksPathError ? 1 : 2);
       });
       say(`installed ${hook}`);
       if (chained) say(`your existing hook still runs after it: ${chained}`);
