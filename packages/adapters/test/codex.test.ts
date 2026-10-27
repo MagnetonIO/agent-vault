@@ -179,7 +179,8 @@ describe("install", () => {
     const scrub = found.find((h) => h.event === "SessionStart");
     expect(prompt?.command).toMatch(/ hook codex prompt-submit$/);
     expect(scrub?.command).toMatch(/ hook codex scrub$/);
-    expect(prompt?.command).toContain(m.command[1]);
+    // the hook command line writes paths with forward slashes on Windows
+    expect(prompt?.command).toContain((m.command[1] as string).replaceAll("\\", "/"));
     expect(read(hooksFile())).not.toContain("SessionEnd");
 
     // `features.hooks` is on by default in Codex 0.164 (S3): it is not written.
@@ -376,7 +377,10 @@ describe("MCP", () => {
     write(configFile(), USER_CONFIG);
     const m = make({
       onCodex: async (args) => {
-        fs.appendFileSync(configFile(), `\n[mcp_servers.agent-vault]\ncommand = "${args[4]}"\n`);
+        fs.appendFileSync(
+          configFile(),
+          `\n[mcp_servers.agent-vault]\ncommand = ${tomlString(args[4] as string)}\n`,
+        );
         return { code: 0 };
       },
     });
