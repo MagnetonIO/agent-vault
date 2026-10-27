@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { randomKey } from "@agent-vault/crypto";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
+  KeyfileCorruptError,
   KeyringUnavailableError,
   MemoryKeyStore,
   mapKeyringError,
@@ -110,12 +111,53 @@ describe("keyfile store", () => {
     expect(await s.load()).toBeNull();
   }, 30_000);
 
-  test("tampered or malformed files are rejected, not mistaken for 'no key'", async () => {
-    fs.writeFileSync(file(), "not json");
-    await expect(openKeyfileStore(file(), "pw").load()).rejects.toThrow(/keyfile/);
-    fs.writeFileSync(file(), JSON.stringify({ v: 2, salt: "AA==", sealed: "AA==" }));
-    await expect(openKeyfileStore(file(), "pw").load()).rejects.toThrow(/keyfile/);
+  describe("corrupt files give KeyfileCorruptError, not WrongPassphraseError", () => {
+    const sealedOk = Buffer.alloc(64, 1).toString("base64");
+    const saltOk = Buffer.alloc(16, 2).toString("base64");
+    const cases: [string, string][] = [
+      ["invalid JSON", "not json"],
+      ["JSON null", "null"],
+      ["JSON array", "[]"],
+      ["wrong version", JSON.stringify({ v: 2, salt: saltOk, sealed: sealedOk })],
+      ["missing salt", JSON.stringify({ v: 1, sealed: sealedOk })],
+      ["missing sealed", JSON.stringify({ v: 1, salt: saltOk })],
+      ["non-string fields", JSON.stringify({ v: 1, salt: 5, sealed: [] })],
+      ["empty salt", JSON.stringify({ v: 1, salt: "", sealed: sealedOk })],
+      ["one-byte salt", JSON.stringify({ v: 1, salt: "AA==", sealed: sealedOk })],
+      [
+        "15-byte salt",
+        JSON.stringify({ v: 1, salt: Buffer.alloc(15).toString("base64"), sealed: sealedOk }),
+      ],
+      ["salt that is not base64", JSON.stringify({ v: 1, salt: "!!!!", sealed: sealedOk })],
+      ["empty sealed", JSON.stringify({ v: 1, salt: saltOk, sealed: "" })],
+      [
+        "truncated sealed data",
+        JSON.stringify({ v: 1, salt: saltOk, sealed: Buffer.alloc(39).toString("base64") }),
+      ],
+    ];
 
+    test.each(cases)("%s", async (_name, content) => {
+      fs.writeFileSync(file(), content);
+      const err = await openKeyfileStore(file(), "pw")
+        .load()
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(KeyfileCorruptError);
+      expect(err).not.toBeInstanceOf(WrongPassphraseError);
+      expect((err as Error).name).toBe("KeyfileCorruptError");
+    });
+
+    test("a truncated real keyfile", async () => {
+      await openKeyfileStore(file(), "pw").save(randomKey());
+      const j = JSON.parse(fs.readFileSync(file(), "utf8"));
+      const sealed = Buffer.from(j.sealed, "base64").subarray(0, 30);
+      fs.writeFileSync(file(), JSON.stringify({ ...j, sealed: sealed.toString("base64") }));
+      await expect(openKeyfileStore(file(), "pw").load()).rejects.toBeInstanceOf(
+        KeyfileCorruptError,
+      );
+    }, 30_000);
+  });
+
+  test("a flipped ciphertext bit is indistinguishable from a wrong passphrase", async () => {
     await openKeyfileStore(file(), "pw").save(randomKey());
     const j = JSON.parse(fs.readFileSync(file(), "utf8"));
     const sealed = Buffer.from(j.sealed, "base64");
@@ -124,6 +166,17 @@ describe("keyfile store", () => {
     await expect(openKeyfileStore(file(), "pw").load()).rejects.toBeInstanceOf(
       WrongPassphraseError,
     );
+  }, 30_000);
+
+  test("save creates a missing parent dir as private and tightens a loose one", async () => {
+    const dir = path.join(tmp, "nested", "keys");
+    await openKeyfileStore(path.join(dir, "root.key"), "pw").save(randomKey());
+    expect(fs.existsSync(path.join(dir, "root.key"))).toBe(true);
+    if (process.platform === "win32") return;
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+    fs.chmodSync(dir, 0o755);
+    await openKeyfileStore(path.join(dir, "root.key"), "pw").save(randomKey());
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
   }, 30_000);
 
   test("equivalent Unicode passphrases match (NFKC)", async () => {
@@ -157,10 +210,12 @@ describe("mapKeyringError", () => {
 
 // Review Focus 4. Runs in a child process so the env reaches the native addon for certain, and so
 // the bus address is fixed before libdbus starts. Unsetting DBUS_SESSION_BUS_ADDRESS is not enough
-// (dbus-x11 autolaunch), so point it at a socket that does not exist.
+// (dbus-x11 autolaunch), so point it at a socket that does not exist. The child runs the TypeScript
+// source through tsx, so this does not depend on a prior build of this package.
 describe.skipIf(process.platform !== "linux")("Linux without a Secret Service", () => {
   test("openOsKeyring().load() throws KeyringUnavailableError, never falls back to keyutils", () => {
-    const entry = pathToFileURL(path.resolve(import.meta.dirname, "../dist/index.js")).href;
+    const root = path.resolve(import.meta.dirname, "../../..");
+    const entry = pathToFileURL(path.join(root, "packages/platform/src/index.ts")).href;
     const script = `
       import(${JSON.stringify(entry)}).then(async (m) => {
         try {
@@ -170,10 +225,15 @@ describe.skipIf(process.platform !== "linux")("Linux without a Secret Service", 
           console.log(e.name + "|" + e.message);
         }
       });`;
-    const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
-      env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent" },
-      encoding: "utf8",
-    }).trim();
+    const out = execFileSync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", script],
+      {
+        cwd: root, // --import resolves "tsx" from here
+        env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent" },
+        encoding: "utf8",
+      },
+    ).trim();
     expect(out).toBe(
       "KeyringUnavailableError|No Secret Service found. Run: agent-vault init --keystore keyfile",
     );

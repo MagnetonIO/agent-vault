@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { ensurePrivateDir, icaclsCommands } from "../src/index.js";
+import { ensurePrivateDir, icaclsCommands, icaclsExe } from "../src/index.js";
 
 const posix = process.platform !== "win32";
 let tmp: string;
@@ -76,13 +76,46 @@ describe.skipIf(!posix)("ensurePrivateDir (POSIX)", () => {
     fs.mkdirSync(real);
     const link = path.join(tmp, "link");
     fs.symlinkSync(real, link);
-    expect(() => ensurePrivateDir(link)).toThrow(/not a directory/);
+    expect(() => ensurePrivateDir(link)).toThrow(/symlink or junction/);
   });
 
   test("refuses a regular file", () => {
     const file = path.join(tmp, "file");
     fs.writeFileSync(file, "x");
     expect(() => ensurePrivateDir(file)).toThrow();
+  });
+});
+
+// The lstat checks run before icacls, so these work on any OS with platform = "win32".
+describe("ensurePrivateDir refuses links and files before touching ACLs (win32 path)", () => {
+  test("symlink to a dir", () => {
+    if (!posix) return; // Windows symlinks need privileges; the junction test below covers it
+    const real = path.join(tmp, "real");
+    fs.mkdirSync(real);
+    const link = path.join(tmp, "link");
+    fs.symlinkSync(real, link);
+    expect(() => ensurePrivateDir(link, "win32")).toThrow(/symlink or junction/);
+  });
+
+  test("regular file", () => {
+    const file = path.join(tmp, "file");
+    fs.writeFileSync(file, "x");
+    expect(() => ensurePrivateDir(file, "win32")).toThrow();
+  });
+
+  test.skipIf(posix)("junction (real Windows)", () => {
+    const real = path.join(tmp, "real");
+    fs.mkdirSync(real);
+    const link = path.join(tmp, "junction");
+    fs.symlinkSync(real, link, "junction");
+    expect(() => ensurePrivateDir(link)).toThrow(/symlink or junction/);
+  });
+});
+
+describe("icaclsExe", () => {
+  test("is System32\\icacls.exe under SystemRoot, with a default", () => {
+    expect(icaclsExe({ SystemRoot: "D:\\WIN" })).toBe("D:\\WIN\\System32\\icacls.exe");
+    expect(icaclsExe({})).toBe("C:\\Windows\\System32\\icacls.exe");
   });
 });
 
@@ -99,7 +132,7 @@ describe.skipIf(posix)("ensurePrivateDir (Windows, real icacls)", () => {
   test("leaves only the current user on the dir ACL", () => {
     const dir = path.join(tmp, "locked");
     ensurePrivateDir(dir);
-    const acl = execFileSync("icacls", [dir], { encoding: "utf8" });
+    const acl = execFileSync(icaclsExe(), [dir], { encoding: "utf8" });
     expect(acl).toContain(os.userInfo().username);
     expect(acl).not.toContain("NT AUTHORITY\\SYSTEM");
     expect(acl).not.toContain("BUILTIN\\Administrators");

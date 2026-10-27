@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DecryptError, deriveKeyfileKey, encodeAad, open, seal } from "@agent-vault/crypto";
 import { Entry } from "@napi-rs/keyring";
+import { ensurePrivateDir } from "./private-dir.js";
 
 export interface RootKeyStore {
   readonly kind: "os-keyring" | "keyfile" | "memory";
@@ -22,6 +23,14 @@ export class WrongPassphraseError extends Error {
   constructor() {
     super("wrong passphrase, or the keyfile was modified");
     this.name = "WrongPassphraseError";
+  }
+}
+
+/** The keyfile cannot be parsed or is structurally invalid; not a passphrase problem. */
+export class KeyfileCorruptError extends Error {
+  constructor(reason: string) {
+    super(`keyfile is corrupt: ${reason}`);
+    this.name = "KeyfileCorruptError";
   }
 }
 
@@ -98,8 +107,20 @@ const KEYFILE_AAD = encodeAad({
 
 interface KeyfileJson {
   v: 1;
-  salt: string;
-  sealed: string;
+  salt: Uint8Array;
+  sealed: Uint8Array;
+}
+
+const SALT_MIN = 16;
+const NONCE_LEN = 24;
+const TAG_LEN = 16;
+
+/** Strict base64: only the canonical encoding of the bytes is accepted. */
+function b64(value: unknown, field: string): Uint8Array {
+  if (typeof value !== "string") throw new KeyfileCorruptError(`${field} is missing`);
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) throw new KeyfileCorruptError(`${field} is not base64`);
+  return Uint8Array.from(bytes);
 }
 
 function parseKeyfile(text: string): KeyfileJson {
@@ -107,13 +128,48 @@ function parseKeyfile(text: string): KeyfileJson {
   try {
     j = JSON.parse(text);
   } catch {
-    throw new Error("keyfile is not valid JSON");
+    throw new KeyfileCorruptError("not valid JSON");
   }
-  const o = j as Partial<KeyfileJson> | null;
-  if (o?.v !== 1 || typeof o.salt !== "string" || typeof o.sealed !== "string") {
-    throw new Error("keyfile has an unsupported format");
+  const o = (typeof j === "object" ? j : null) as Record<string, unknown> | null;
+  if (o?.v !== 1) throw new KeyfileCorruptError("unsupported version");
+  const salt = b64(o.salt, "salt");
+  if (salt.length < SALT_MIN) throw new KeyfileCorruptError("salt is too short");
+  const sealed = b64(o.sealed, "sealed");
+  if (sealed.length < NONCE_LEN + TAG_LEN)
+    throw new KeyfileCorruptError("sealed data is too short");
+  return { v: 1, salt, sealed };
+}
+
+/** temp file (0600) + fsync + rename + best-effort fsync of the parent dir. */
+function writeFileAtomic(file: string, data: string): void {
+  const dir = path.dirname(file);
+  const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.tmp`);
+  try {
+    fs.rmSync(tmp, { force: true });
+    const fd = fs.openSync(tmp, "wx", 0o600);
+    try {
+      fs.writeFileSync(fd, data);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
   }
-  return o as KeyfileJson;
+  if (process.platform !== "win32") {
+    try {
+      const dfd = fs.openSync(dir, "r");
+      try {
+        fs.fsyncSync(dfd);
+      } finally {
+        fs.closeSync(dfd);
+      }
+    } catch {
+      // durability of the rename only; the file itself is already in place
+    }
+  }
 }
 
 /**
@@ -133,9 +189,14 @@ export function openKeyfileStore(file: string, passphrase: string): RootKeyStore
         throw err;
       }
       const { salt, sealed } = parseKeyfile(text);
-      const key = deriveKeyfileKey(passphrase, Buffer.from(salt, "base64"));
+      let key: Uint8Array;
       try {
-        return open(key, Buffer.from(sealed, "base64"), KEYFILE_AAD);
+        key = deriveKeyfileKey(passphrase, salt);
+      } catch {
+        throw new KeyfileCorruptError("key derivation failed");
+      }
+      try {
+        return open(key, sealed, KEYFILE_AAD);
       } catch (err) {
         if (err instanceof DecryptError) throw new WrongPassphraseError();
         throw err;
@@ -152,20 +213,15 @@ export function openKeyfileStore(file: string, passphrase: string): RootKeyStore
       } finally {
         key.fill(0);
       }
-      const json: KeyfileJson = {
-        v: 1,
-        salt: salt.toString("base64"),
-        sealed: Buffer.from(sealed).toString("base64"),
-      };
-      const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`);
-      try {
-        fs.rmSync(tmp, { force: true });
-        fs.writeFileSync(tmp, `${JSON.stringify(json)}\n`, { mode: 0o600, flag: "wx" });
-        fs.renameSync(tmp, file);
-      } catch (err) {
-        fs.rmSync(tmp, { force: true });
-        throw err;
-      }
+      ensurePrivateDir(path.dirname(file));
+      writeFileAtomic(
+        file,
+        `${JSON.stringify({
+          v: 1,
+          salt: salt.toString("base64"),
+          sealed: Buffer.from(sealed).toString("base64"),
+        })}\n`,
+      );
     },
     async remove() {
       fs.rmSync(file, { force: true });
