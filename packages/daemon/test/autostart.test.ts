@@ -40,6 +40,7 @@ describe("ensureDaemon", () => {
         initialized: false,
         keystore: "keyfile",
         version: "0.0.0",
+        pid: expect.any(Number),
       });
     } finally {
       client.close();
@@ -56,6 +57,20 @@ describe("ensureDaemon", () => {
     });
     expect(await second.call("status")).toMatchObject({ keystore: "keyfile" });
     second.close();
+  });
+
+  test("3 concurrent ensureDaemon calls all end up on the same daemon", async () => {
+    const spawnArgv = [process.execPath, "--import", tsxLoader, fixture];
+    const clients = await Promise.all([1, 2, 3].map(() => ensureDaemon(tmp.paths, { spawnArgv })));
+    try {
+      const pids = await Promise.all(
+        clients.map(async (c) => (await c.call<{ pid: number }>("status")).pid),
+      );
+      expect(new Set(pids).size).toBe(1);
+      expect(pids[0]).not.toBe(process.pid);
+    } finally {
+      for (const c of clients) c.close();
+    }
   });
 
   test("gives up after timeoutMs when the spawned process never serves", async () => {

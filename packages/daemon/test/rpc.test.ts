@@ -49,6 +49,7 @@ describe.each(MODES)("daemon over %s", (mode) => {
         initialized: false,
         keystore: "memory",
         version: "0.0.0",
+        pid: process.pid,
       });
     });
 

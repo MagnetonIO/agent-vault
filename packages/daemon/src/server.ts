@@ -21,6 +21,7 @@ import {
   macMatches,
   newNonce,
 } from "./handshake.js";
+import { acquireLock } from "./lock.js";
 import { type DaemonState, registry as defaultRegistry, type Registry } from "./methods/index.js";
 import { ERR, encodeLine, LineSplitter, MAX_LINE_BYTES, parseRequestLine } from "./rpc.js";
 
@@ -263,35 +264,39 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
   const { paths, store } = opts;
   const endpoint = opts.endpoint ?? ipcEndpoint(paths);
   const state: DaemonState = { vault: null, initializing: false, closed: false };
-  try {
-    state.vault = await openVault({ paths, store });
-  } catch (err) {
-    if (!(err instanceof VaultNotInitializedError)) throw err;
-  }
+  // First and synchronous: of several daemons started at once, exactly one gets past this line.
+  const releaseLock = acquireLock(paths.runtimeDir);
 
-  const dispatch = createDispatcher({
-    registry: opts.methods ?? defaultRegistry,
-    state,
-    paths,
-    store,
-  });
   const token = endpoint.kind === "tcp" ? randomBytes(32) : null;
   const sockets = new Set<net.Socket>();
-  const server = net.createServer((socket) => {
-    sockets.add(socket);
-    socket.once("close", () => sockets.delete(socket));
-    serveConnection({ socket, token, dispatch });
-  });
-  server.maxConnections = MAX_CONNECTIONS;
-
   let removeEndpoint: () => void;
+  let server: net.Server;
   try {
+    try {
+      state.vault = await openVault({ paths, store });
+    } catch (err) {
+      if (!(err instanceof VaultNotInitializedError)) throw err;
+    }
+    const dispatch = createDispatcher({
+      registry: opts.methods ?? defaultRegistry,
+      state,
+      paths,
+      store,
+    });
+    server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+      serveConnection({ socket, token, dispatch });
+    });
+    server.maxConnections = MAX_CONNECTIONS;
     removeEndpoint =
       endpoint.kind === "unix"
         ? await listenUnix(server, endpoint.path)
         : await listenTcp(server, endpoint, token as Buffer);
   } catch (err) {
     state.vault?.close();
+    token?.fill(0);
+    releaseLock();
     throw err;
   }
 
@@ -306,6 +311,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
       state.vault = null;
       token?.fill(0);
       removeEndpoint();
+      releaseLock();
     })();
     return closing;
   };

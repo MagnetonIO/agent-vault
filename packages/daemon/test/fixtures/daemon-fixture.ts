@@ -16,6 +16,9 @@ const paths = getPaths();
 const daemon = await startDaemon({
   paths,
   store: openKeyfileStore(path.join(paths.dataDir, "root.key"), passphrase),
+}).catch((err: unknown) => {
+  // Losing the race to another instance (DaemonAlreadyRunningError) is the expected way to exit.
+  process.exit(err instanceof Error && err.name === "DaemonAlreadyRunningError" ? 0 : 1);
 });
 
 let stopping = false;

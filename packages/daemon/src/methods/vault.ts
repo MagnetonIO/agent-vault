@@ -9,7 +9,12 @@ export const vaultMethods: Registry = {
     returnsSecret: false,
     handler: (ctx, params) => {
       paramsObject(params, []);
-      return { initialized: ctx.state.vault !== null, keystore: ctx.store.kind, version: VERSION };
+      return {
+        initialized: ctx.state.vault !== null,
+        keystore: ctx.store.kind,
+        version: VERSION,
+        pid: process.pid,
+      };
     },
   },
   "vault.init": {
