@@ -746,6 +746,45 @@ describe("install and uninstall", () => {
 });
 
 describe("doctor", () => {
+  test("disableAllHooks or allowManagedHooksOnly in settings.json or settings.local.json is red", async () => {
+    const m = make();
+    await m.adapter.install({ home: box.home });
+    const settings = path.join(box.home, ".claude", "settings.json");
+    const local = path.join(box.home, ".claude", "settings.local.json");
+    const enabled = async () =>
+      (await m.adapter.doctor(box.home)).checks.find((c) => c.name === "hooks enabled");
+
+    expect(await enabled()).toMatchObject({
+      ok: true,
+      detail: expect.stringContaining("a managed policy can still turn hooks off"),
+    });
+
+    const installed = read(settings);
+    write(settings, JSON.stringify({ ...JSON.parse(installed), disableAllHooks: true }));
+    expect(await enabled()).toMatchObject({
+      ok: false,
+      detail: `disableAllHooks is true in ${settings}, so Claude Code runs no agent-vault hook`,
+      fix: `remove disableAllHooks from ${settings}`,
+    });
+    expect((await m.adapter.doctor(box.home)).ok).toBe(false);
+
+    write(settings, installed);
+    write(local, JSON.stringify({ disableAllHooks: true }));
+    expect(await enabled()).toMatchObject({
+      ok: false,
+      fix: `remove disableAllHooks from ${local}`,
+    });
+
+    write(local, JSON.stringify({ allowManagedHooksOnly: true }));
+    expect(await enabled()).toMatchObject({
+      ok: false,
+      fix: `remove allowManagedHooksOnly from ${local}`,
+    });
+
+    write(local, JSON.stringify({ disableAllHooks: false }));
+    expect(await enabled()).toMatchObject({ ok: true });
+  });
+
   test("a wrapped MCP server whose command is gone is red, with the words to use instead", async () => {
     const m = make();
     const nowhere = path.join(box.dir, "gone", "agent-vault");
@@ -796,6 +835,7 @@ describe("doctor", () => {
     const report = await m.adapter.doctor(box.home);
     expect(report.checks.map((c) => [c.name, c.ok])).toEqual([
       ["hooks", true],
+      ["hooks enabled", true],
       ["daemon", true],
       ["vault", true],
       ["mcp", true],

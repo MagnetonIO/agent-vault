@@ -263,7 +263,7 @@ describe("install, doctor, uninstall", { timeout: TIMEOUT_MS }, () => {
     );
     expect(red.stdout).toContain("fix: run /hooks in Codex and press t");
     expect(red.stdout).toMatch(/ok\s+probe/);
-    expect(red.stdout).toContain("1 of 8 checks failed");
+    expect(red.stdout).toContain("1 of 9 checks failed");
 
     // Pressing `t` in Codex writes the trust tables (our hooks are group 0 of their events).
     fs.appendFileSync(configFile, trustText());
@@ -274,7 +274,7 @@ describe("install, doctor, uninstall", { timeout: TIMEOUT_MS }, () => {
       /warn\s+history\s+blocked prompts typed in the TUI land in history\.jsonl until the next scrub/,
     );
     expect(green.stdout).toMatch(/info {2}sqlite: state_5\.sqlite/);
-    expect(green.stdout).toContain("all 8 checks passed");
+    expect(green.stdout).toContain("all 9 checks passed");
 
     // A second install keeps hooks.json byte for byte, so the trust holds, and asks for nothing.
     const hooksBefore = read(hooksFile);

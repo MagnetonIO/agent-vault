@@ -489,6 +489,35 @@ export function createClaudeCodeAdapter(deps: ClaudeCodeDeps): HarnessAdapter {
         }
       }
 
+      // settings that switch every hook off, ours included, without a word
+      const switches: { file: string; key: string }[] = [];
+      for (const file of [settings, path.join(configDir(home), "settings.local.json")]) {
+        let fileRoot: Record<string, unknown>;
+        try {
+          fileRoot = file === settings ? root : parsed(file, read(file));
+        } catch {
+          continue; // settings.json is reported above; a broken local file is Claude's to report
+        }
+        for (const key of ["disableAllHooks", "allowManagedHooksOnly"]) {
+          if (fileRoot[key] === true) switches.push({ file, key });
+        }
+      }
+      const off = switches[0];
+      if (off) {
+        add(
+          "hooks enabled",
+          false,
+          `${off.key} is true in ${off.file}, so Claude Code runs no agent-vault hook`,
+          `remove ${off.key} from ${off.file}`,
+        );
+      } else {
+        add(
+          "hooks enabled",
+          true,
+          "neither disableAllHooks nor allowManagedHooksOnly is set in your settings (a managed policy can still turn hooks off; doctor does not read it)",
+        );
+      }
+
       // daemon and vault
       let client: HookClient | undefined;
       try {

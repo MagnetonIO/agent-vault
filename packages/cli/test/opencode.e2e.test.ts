@@ -49,7 +49,7 @@ test("install, doctor and uninstall for opencode, in a sandbox that never runs o
     const doctor = await run(["doctor", "opencode"]);
     expect(doctor.code, doctor.stdout + doctor.stderr).toBe(0);
     expect(doctor.stdout).not.toContain("FAIL");
-    expect(doctor.stdout).toContain("all 3 checks passed");
+    expect(doctor.stdout).toContain("all 4 checks passed");
     expect(doctor.stdout).toContain(
       "info  prompt capture: use agent-vault grab (no OpenCode prompt hook yet)",
     );

@@ -295,7 +295,7 @@ describe("install, doctor, uninstall", { timeout: TIMEOUT_MS }, () => {
     expect(doctor.code, doctor.stdout + doctor.stderr).toBe(0);
     expect(doctor.stdout).not.toContain("FAIL");
     expect(doctor.stdout).toMatch(/ok\s+probe/);
-    expect(doctor.stdout).toContain("all 6 checks passed");
+    expect(doctor.stdout).toContain("all 8 checks passed");
 
     const command = (JSON.parse(text).hooks.UserPromptSubmit[0].hooks[0] as { command: string })
       .command;
