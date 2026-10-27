@@ -47,7 +47,10 @@ function checkKeyring() {
   const { Entry } = loadAddon("keyring.node");
   // Pin Linux to Secret Service: the default silently falls back to the kernel keyutils
   // keyring, which does not survive a reboot. The option is ignored on macOS/Windows.
-  const entry = new Entry(SERVICE, ACCOUNT, { linux: { store: "secret-service" } });
+  // SPIKE_NO_PIN=1 is a control: it drops the pin to show the pin is what prevents the fallback.
+  const options =
+    process.env.SPIKE_NO_PIN === "1" ? undefined : { linux: { store: "secret-service" } };
+  const entry = new Entry(SERVICE, ACCOUNT, options);
   const secret = `spike-${process.pid}-${Date.now()}`;
   try {
     entry.setPassword(secret);

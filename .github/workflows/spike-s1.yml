@@ -54,13 +54,35 @@ jobs:
           tail -n 1 plain.log | grep -qx OK
           tail -n 1 sea.log | grep -qx OK
 
-      # The pin must fail loudly (not fall back to the kernel keyring) when no Secret Service
-      # is reachable. No dbus session here, so the keyring step has to FAIL.
-      - name: Pin check, no Secret Service available (Linux, must fail)
+      # Pin evidence, two distinct failure modes (the pinned Entry must throw, never fall back).
+      # 1. Locked keyring: a bus exists (libdbus autolaunches one because dbus-x11 is installed)
+      #    but its keyring is not unlocked.
+      - name: Pin check, locked keyring (Linux, must fail)
         if: runner.os == 'Linux'
         run: |
-          if env -u DBUS_SESSION_BUS_ADDRESS ./dist/s1-spike | tee pin.log; then
-            echo "expected failure: pin did not hold" >&2
+          if ./dist/s1-spike | tee pin-locked.log; then
+            echo "expected failure: pinned entry succeeded on a locked keyring" >&2
             exit 1
           fi
-          grep -q "keyring: FAIL" pin.log
+          grep "keyring: FAIL" pin-locked.log
+
+      # 2. No bus at all: the address points nowhere, so libdbus has nothing to connect to and
+      #    no autolaunch. Pinned must fail; the unpinned control (SPIKE_NO_PIN=1) shows what the
+      #    pin prevents, i.e. whether it silently succeeds through the kernel keyutils keyring.
+      - name: Pin check, no bus (Linux, pinned must fail)
+        if: runner.os == 'Linux'
+        run: |
+          export DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent
+          if ./dist/s1-spike | tee pin-nobus.log; then
+            echo "expected failure: pinned entry succeeded without a bus" >&2
+            exit 1
+          fi
+          grep "keyring: FAIL" pin-nobus.log
+
+      - name: Pin control, no bus, no pin (Linux, observe)
+        if: runner.os == 'Linux'
+        run: |
+          export DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent
+          SPIKE_NO_PIN=1 ./dist/s1-spike | tee nopin-nobus.log || echo "CONTROL RESULT: failed"
+          tail -n 1 nopin-nobus.log | grep -qx OK && echo "CONTROL RESULT: succeeded"
+          cat /proc/keys | head -5 || true
