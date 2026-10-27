@@ -29,6 +29,8 @@ export type DaemonOptions = {
   recovering?: boolean | undefined;
   /** Told the pid of the daemon this call spawned, if it spawned one. */
   onSpawn?: ((pid: number | undefined) => void) | undefined;
+  /** `false` when stdin belongs to another protocol (`mcp`): never prompt for the passphrase. */
+  interactive?: boolean | undefined;
 };
 
 export const RECOVERY_IN_PROGRESS = "vault recovery in progress";
@@ -60,7 +62,7 @@ export async function daemonClient(
   if (readConfig(paths) === "keyfile") {
     let passphrase = opts.passphrase ?? process.env[PASSPHRASE_ENV];
     if (!passphrase) {
-      if (!isTty()) throw new CliError(LOCKED_MESSAGE, 2);
+      if (opts.interactive === false || !isTty()) throw new CliError(LOCKED_MESSAGE, 2);
       passphrase = await promptPassphrase(!fs.existsSync(keyfilePath(paths)));
     }
     if (/[\r\n]/.test(passphrase)) throw new CliError("the passphrase must be a single line");

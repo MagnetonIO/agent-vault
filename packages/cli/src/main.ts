@@ -8,6 +8,7 @@ import { grabCommand } from "./commands/grab.js";
 import { helperCommand } from "./commands/helper.js";
 import { initCommand } from "./commands/init.js";
 import { listCommand } from "./commands/list.js";
+import { mcpCommand } from "./commands/mcp.js";
 import { recoverCommand } from "./commands/recover.js";
 import { rmCommand } from "./commands/rm.js";
 import { runCommand } from "./commands/run.js";
@@ -38,6 +39,7 @@ for (const register of [
   bundleCommand,
   auditCommand,
   helperCommand,
+  mcpCommand,
   daemonCommand,
 ]) {
   register(program);
