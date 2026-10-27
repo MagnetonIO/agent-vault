@@ -44,8 +44,9 @@ describe("single-instance lock", () => {
   const lockFile = () => path.join(tmp.paths.runtimeDir, "vaultd.lock");
   const start = () => startDaemon({ paths: tmp.paths, store: new MemoryKeyStore() });
   const readLock = () => JSON.parse(fs.readFileSync(lockFile(), "utf8")) as LockContent;
-  const writeInfo = (pid: number, bootId: string) =>
-    writeLock(JSON.stringify({ pid, bootId, startedAt: new Date().toISOString() }));
+  /** A lock as an earlier boot would have left it: Windows has no boot id, so it records a longer uptime. */
+  const writeInfo = (pid: number, bootId: string, uptimeMs?: number) =>
+    writeLock(JSON.stringify({ pid, bootId, uptimeMs, startedAt: new Date().toISOString() }));
   const writeLock = (text: string) => {
     fs.mkdirSync(tmp.paths.runtimeDir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(lockFile(), text);
@@ -112,9 +113,8 @@ describe("single-instance lock", () => {
   });
 
   test("a live pid with a different boot id (pid reused after a reboot) is reaped", async () => {
-    const other =
-      process.platform === "win32" ? "win:1000" : "00000000-dead-beef-0000-000000000000";
-    writeInfo(process.ppid, other);
+    // Windows has no boot id, so "an earlier boot" there is a lock that recorded a longer uptime.
+    writeInfo(process.ppid, "00000000-dead-beef-0000-000000000000", os.uptime() * 1000 + 3_600_000);
     const d = await start();
     try {
       expect(readLock()).toMatchObject({ pid: process.pid, bootId: readBootId() });
