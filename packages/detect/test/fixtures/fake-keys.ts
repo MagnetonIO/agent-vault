@@ -1,8 +1,19 @@
+import { createHash } from "node:crypto";
+
 // Generated fakes only. Bodies come from a seeded PRNG and every key is assembled from
 // parts at runtime so no literal key-shaped string exists in the repo.
 
-export const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-const UPPER_DIGITS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const range = (from: string, to: string) =>
+  String.fromCharCode(
+    ...Array.from(
+      { length: to.charCodeAt(0) - from.charCodeAt(0) + 1 },
+      (_, i) => from.charCodeAt(0) + i,
+    ),
+  );
+const UPPER = range("A", "Z");
+const DIGITS = range("0", "9");
+export const ALNUM = `${UPPER}${range("a", "z")}${DIGITS}`;
+const UPPER_DIGITS = `${UPPER}${DIGITS}`;
 const URLSAFE = `${ALNUM}_-`;
 export const B64 = `${ALNUM}+/`;
 
@@ -61,8 +72,8 @@ export const benign = {
   branch: "feature/AGENT-1234-add-detect-package-with-long-branch-name",
   lockfileIntegrity: `sha${"512"}-${body(B64, 86, 41)}==`,
   dataUri: `data:image/png;base64,${body(B64, 120, 42)}==`,
-  gitSha: "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3",
-  sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  gitSha: createHash("sha1").update("test").digest("hex"),
+  sha256: createHash("sha256").update("").digest("hex"),
   uuid: "123e4567-e89b-12d3-a456-426614174000",
   npm: "npm install --save-dev vitest typescript",
   path: "/Users/someone/Documents/Development/project/packages/detect/src/index.ts",
