@@ -25,10 +25,18 @@ import {
   WrongPassphraseError,
 } from "@agent-vault/platform";
 import type { CaptureService } from "./capture-page.js";
+import type { Connection } from "./connection.js";
 import { deviceId, harnessOf } from "./device.js";
-import { RpcError } from "./errors.js";
+import {
+  ExeNotAllowedError,
+  HelperNotAllowedError,
+  RpcError,
+  RunError,
+  SecretNotTextError,
+} from "./errors.js";
 import type { Ctx, DaemonState, Registry } from "./methods/index.js";
 import { ERR, type JsonRpcErrorObject } from "./rpc.js";
+import type { RunnerService } from "./runner.js";
 
 /** Errors whose own message is safe to put on the wire. Their messages never carry values or keys. */
 const APP_ERRORS: readonly (abstract new (...args: never[]) => Error)[] = [
@@ -50,6 +58,10 @@ const APP_ERRORS: readonly (abstract new (...args: never[]) => Error)[] = [
   VaultExistsError,
   VaultNotInitializedError,
   WrongPassphraseError,
+  ExeNotAllowedError,
+  HelperNotAllowedError,
+  RunError,
+  SecretNotTextError,
 ];
 
 /** Before `vault.init` only these work. */
@@ -80,6 +92,7 @@ export type Dispatcher = (
   method: string,
   params: unknown,
   notify: (method: string, params: unknown) => void,
+  connection: Connection,
 ) => Promise<CallResult>;
 
 type Deps = {
@@ -88,9 +101,17 @@ type Deps = {
   paths: VaultPaths;
   store: RootKeyStore;
   capture: CaptureService;
+  runner: RunnerService;
 };
 
-export function createDispatcher({ registry, state, paths, store, capture }: Deps): Dispatcher {
+export function createDispatcher({
+  registry,
+  state,
+  paths,
+  store,
+  capture,
+  runner,
+}: Deps): Dispatcher {
   function record(method: string, params: unknown, ctx: Ctx, outcome: AuditInput["outcome"]) {
     if (!state.vault) return;
     appendAudit(state.vault, {
@@ -108,6 +129,7 @@ export function createDispatcher({ registry, state, paths, store, capture }: Dep
     method: string,
     params: unknown,
     notify: (method: string, params: unknown) => void,
+    connection: Connection,
   ): Promise<unknown> {
     const def = Object.hasOwn(registry, method) ? registry[method] : undefined;
     if (!def) throw new RpcError(ERR.METHOD_NOT_FOUND, "method not found");
@@ -118,6 +140,8 @@ export function createDispatcher({ registry, state, paths, store, capture }: Dep
       store,
       state,
       capture,
+      runner,
+      connection,
       audit: {},
       vault() {
         if (!state.vault) throw new VaultNotInitializedError();
@@ -132,7 +156,7 @@ export function createDispatcher({ registry, state, paths, store, capture }: Dep
       result = await def.handler(ctx, params);
     } catch (err) {
       try {
-        record(method, params, ctx, "error");
+        record(method, params, ctx, ctx.audit.failure ?? "error");
       } catch {
         // The handler's error is the one the caller needs; a failed audit append must not hide it.
       }
@@ -143,9 +167,9 @@ export function createDispatcher({ registry, state, paths, store, capture }: Dep
     return result;
   }
 
-  return async (method, params, notify) => {
+  return async (method, params, notify, connection) => {
     try {
-      return { ok: true, result: await run(method, params, notify) };
+      return { ok: true, result: await run(method, params, notify, connection) };
     } catch (err) {
       return { ok: false, error: toErrorObject(err) };
     }

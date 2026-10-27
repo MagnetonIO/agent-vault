@@ -1,6 +1,8 @@
 import type { Vault } from "@agent-vault/core";
 import type { RootKeyStore, VaultPaths } from "@agent-vault/platform";
 import type { CaptureService } from "../capture-page.js";
+import type { Connection } from "../connection.js";
+import type { RunnerService } from "../runner.js";
 
 /** What the daemon holds between calls. `vault` is null until `vault.init` has run. */
 export type DaemonState = {
@@ -13,6 +15,8 @@ export type DaemonState = {
 export type AuditFields = {
   secretName?: string | undefined;
   bundle?: string | undefined;
+  /** Set before throwing to log a refusal as `blocked` instead of `error`. */
+  failure?: "blocked" | undefined;
 };
 
 export type Ctx = {
@@ -21,6 +25,10 @@ export type Ctx = {
   readonly state: DaemonState;
   /** The one-time loopback capture page (Task 11). */
   readonly capture: CaptureService;
+  /** The child processes `run.start` launched (Task 12). */
+  readonly runner: RunnerService;
+  /** The connection making this call; runs belong to the one that started them. */
+  readonly connection: Connection;
   readonly audit: AuditFields;
   /** The open vault; throws VaultNotInitializedError before `vault.init`. */
   vault(): Vault;

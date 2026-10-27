@@ -18,9 +18,14 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_LINE_BYTES = 16 * 1024 * 1024;
 
 export type IpcClient = {
-  call<T = unknown>(method: string, params?: unknown): Promise<T>;
+  /** `opts.timeoutMs` replaces the connection's request timeout for this call; 0 means none. */
+  call<T = unknown>(method: string, params?: unknown, opts?: CallOptions): Promise<T>;
   onNotification(fn: (method: string, params: unknown) => void): void;
   close(): void;
+};
+
+export type CallOptions = {
+  timeoutMs?: number | undefined;
 };
 
 export type ConnectOptions = {
@@ -151,7 +156,7 @@ export function openChannel(endpoint: IpcEndpoint, timeoutMs: number): Promise<C
 type Pending = {
   resolve: (value: never) => void;
   reject: (err: Error) => void;
-  timer: NodeJS.Timeout;
+  timer: NodeJS.Timeout | undefined;
 };
 
 class Client implements IpcClient {
@@ -177,7 +182,7 @@ class Client implements IpcClient {
     this.#drain();
   }
 
-  call<T = unknown>(method: string, params?: unknown): Promise<T> {
+  call<T = unknown>(method: string, params?: unknown, opts: CallOptions = {}): Promise<T> {
     if (this.#closed) return Promise.reject(new Error("connection to vaultd closed"));
     const id = this.#nextId++;
     let line: string;
@@ -189,11 +194,15 @@ class Client implements IpcClient {
     if (Buffer.byteLength(line) - 1 > MAX_LINE_BYTES) {
       return Promise.reject(new Error("request too large"));
     }
+    const timeoutMs = opts.timeoutMs ?? this.#requestTimeoutMs;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.#pending.delete(id);
-        reject(new Error(`request timed out: ${method}`));
-      }, this.#requestTimeoutMs);
+      const timer =
+        timeoutMs === 0
+          ? undefined
+          : setTimeout(() => {
+              this.#pending.delete(id);
+              reject(new Error(`request timed out: ${method}`));
+            }, timeoutMs);
       this.#pending.set(id, { resolve: resolve as (value: never) => void, reject, timer });
       this.#socket.write(line);
     });

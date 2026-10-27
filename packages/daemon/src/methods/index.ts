@@ -1,13 +1,16 @@
+import { helperMethods } from "../helper.js";
 import { auditMethods } from "./audit.js";
 import { bundleMethods } from "./bundle.js";
 import { captureMethods } from "./capture.js";
+import { runMethods } from "./run.js";
 import { secretMethods } from "./secret.js";
 import type { Registry } from "./types.js";
 import { vaultMethods } from "./vault.js";
 
 /**
- * Every RPC method. Nothing here returns secret bytes: `helper.get` (Task 12) is the one method
- * that may set `returnsSecret`, and the registry test fails if any other does.
+ * Every RPC method. Nothing here returns secret bytes except `helper.get`, the one method that
+ * may set `returnsSecret` (and only for secrets tagged `helper`); the registry test fails if any
+ * other does. `run.start` sends the child's output, redacted.
  */
 export const registry: Registry = Object.freeze({
   ...vaultMethods,
@@ -15,6 +18,8 @@ export const registry: Registry = Object.freeze({
   ...bundleMethods,
   ...auditMethods,
   ...captureMethods,
+  ...runMethods,
+  ...helperMethods,
 });
 
 export type { Ctx, DaemonState, MethodDef, Registry } from "./types.js";

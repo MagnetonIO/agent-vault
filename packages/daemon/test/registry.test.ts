@@ -1,11 +1,15 @@
 import http from "node:http";
 import { describe, expect, test } from "vitest";
+import type { RpcError } from "../src/errors.js";
 import { registry } from "../src/methods/index.js";
 import { b64, MODES, useDaemon } from "./helpers.js";
 
 const SECRET = "registry-test-secret-éü-7788";
 
-/** Valid params for every non-mutating method. A new method without an entry fails the test. */
+/** Methods that are not `mutates` but write their own audit events (and are covered in runner.test.ts). */
+const SELF_AUDITED = new Set(["run.start", "run.stdin", "run.signal"]);
+
+/** Valid params for every other non-mutating method. A new method without an entry fails the test. */
 const READ_PARAMS: Record<string, unknown> = {
   status: undefined,
   "secret.list": undefined,
@@ -65,9 +69,8 @@ describe("method registry", () => {
     const leaking = Object.entries(registry)
       .filter(([, def]) => def.returnsSecret)
       .map(([name]) => name);
-    expect(leaking).toEqual([]);
-    // helper.get (Task 12) is the one method allowed to; it is not registered yet.
-    expect(registry["helper.get"]).toBeUndefined();
+    // helper.get is the one method allowed to, and it only serves secrets tagged `helper`.
+    expect(leaking).toEqual(["helper.get"]);
   });
 
   test("the registry is frozen and every entry is complete", () => {
@@ -81,7 +84,7 @@ describe("method registry", () => {
 
   test("the sample params cover every non-mutating method", () => {
     const reads = Object.entries(registry)
-      .filter(([, def]) => !def.mutates)
+      .filter(([name, def]) => !def.mutates && !SELF_AUDITED.has(name))
       .map(([name]) => name)
       .sort();
     expect(Object.keys(READ_PARAMS).sort()).toEqual(reads);
@@ -110,9 +113,16 @@ describe("method registry", () => {
       const page = await submit(begun.url, SECRET);
       const waited = await env.client.call("capture.wait", { elicitationId: begun.elicitationId });
 
-      const responses: unknown[] = [put, begun, waited, page];
+      // helper.get must refuse a secret that is not tagged, with no value in the refusal.
+      const refused = await env.client.call("helper.get", { secret: "leak/check" }).then(
+        (value) => ({ value }),
+        (err: unknown) => ({ message: (err as Error).message, data: (err as RpcError).data }),
+      );
+      expect(refused).not.toHaveProperty("value");
+
+      const responses: unknown[] = [put, begun, waited, page, refused];
       for (const [method, def] of Object.entries(registry)) {
-        if (def.mutates) continue;
+        if (def.mutates || SELF_AUDITED.has(method)) continue;
         responses.push(await env.client.call(method, READ_PARAMS[method]));
       }
       const wire = JSON.stringify(responses);

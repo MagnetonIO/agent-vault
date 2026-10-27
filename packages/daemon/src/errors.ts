@@ -36,3 +36,41 @@ export class RpcError extends Error {
     this.data = data;
   }
 }
+
+/**
+ * `run.start` refused: the bundle lists executables and the resolved `argv[0]` is not one of them.
+ * The message names the resolved path, which is not a secret.
+ */
+export class ExeNotAllowedError extends Error {
+  constructor(resolved: string) {
+    super(`executable is not allowed by the bundle: ${resolved}`);
+    this.name = "ExeNotAllowedError";
+  }
+}
+
+/** `helper.get` refused: the secret is not tagged `helper`. Names the secret only. */
+export class HelperNotAllowedError extends Error {
+  constructor(secret: string) {
+    super(`secret ${secret} is not available to credential helpers (it lacks the helper tag)`);
+    this.name = "HelperNotAllowedError";
+  }
+}
+
+/** A secret that cannot be handed over as text (not valid UTF-8). Names the secret only. */
+export class SecretNotTextError extends Error {
+  constructor(secret: string) {
+    super(`secret ${secret} is not valid UTF-8 text`);
+    this.name = "SecretNotTextError";
+  }
+}
+
+/**
+ * A `run.*` call that cannot proceed (unknown run, too-short secret, command not found, …).
+ * Messages are built from names and fixed text only, never from secret values.
+ */
+export class RunError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunError";
+  }
+}

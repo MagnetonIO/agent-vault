@@ -12,6 +12,7 @@ import {
 } from "@agent-vault/platform";
 import { type CaptureOptions, createCaptureService } from "./capture-page.js";
 import { connect } from "./client.js";
+import { Connection } from "./connection.js";
 import { createDispatcher, type Dispatcher } from "./dispatch.js";
 import { DaemonAlreadyRunningError } from "./errors.js";
 import {
@@ -25,6 +26,7 @@ import {
 import { acquireLock } from "./lock.js";
 import { type DaemonState, registry as defaultRegistry, type Registry } from "./methods/index.js";
 import { ERR, encodeLine, LineSplitter, MAX_LINE_BYTES, parseRequestLine } from "./rpc.js";
+import { createRunnerService } from "./runner.js";
 
 /** Authenticated connections (on unix, where there is no handshake, all connections). */
 export const MAX_CONNECTIONS = 64;
@@ -224,6 +226,9 @@ function serveConnection({ socket, token, dispatch, limits }: Conn): void {
     socket.destroy();
     return;
   }
+  // Runs started on this connection end with it.
+  const connection = new Connection();
+  socket.once("close", () => connection.close());
   // Where this connection is counted: pending until the handshake passes (unix: never pending).
   let authenticated = token === null;
   socket.once("close", () => limits.release(socket, authenticated));
@@ -261,7 +266,7 @@ function serveConnection({ socket, token, dispatch, limits }: Conn): void {
     }
     inFlight++;
     try {
-      const outcome = await dispatch(req.method, req.params, notify);
+      const outcome = await dispatch(req.method, req.params, notify, connection);
       try {
         send(
           outcome.ok
@@ -362,6 +367,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
   const releaseLock = acquireLock(paths.runtimeDir);
 
   const capture = createCaptureService(state, opts.capture);
+  const runner = createRunnerService();
   const token = endpoint.kind === "tcp" ? randomBytes(32) : null;
   const sockets = new Set<net.Socket>();
   let removeEndpoint: () => void;
@@ -378,6 +384,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
       paths,
       store,
       capture,
+      runner,
     });
     const limits = new Limits(token !== null);
     server = net.createServer((socket) => {
@@ -390,6 +397,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
         ? await listenUnix(server, endpoint.path)
         : await listenTcp(server, endpoint, token as Buffer);
   } catch (err) {
+    await runner.close();
     await capture.close();
     state.vault?.close();
     token?.fill(0);
@@ -404,6 +412,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<DaemonHandl
       const stopped = new Promise<void>((resolve) => server.close(() => resolve()));
       for (const socket of sockets) socket.destroy();
       await stopped;
+      await runner.close();
       await capture.close();
       state.vault?.close();
       state.vault = null;
