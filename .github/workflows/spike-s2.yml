@@ -36,8 +36,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          $pw = 'Sp1ke-Other-' + [guid]::NewGuid().ToString('N').Substring(0, 12)
+          # 14 chars max: longer makes `net user` prompt (Y/N) and fail non-interactively
+          $pw = 'Sp!k3-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
           net user avspike2 $pw /add
+          if ($LASTEXITCODE -ne 0) { throw 'net user failed' }
           "SPIKE_OTHER_USER=avspike2" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "SPIKE_OTHER_PASS=$pw" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           whoami /user

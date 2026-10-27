@@ -116,8 +116,7 @@ section("pre-created directory owned by another user");
       `dir owner uid=${st.uid} mode=${octal(st.mode)} -> daemon check (uid==me && mode&077==0 && isDirectory) says safe=${safe}`,
     );
     if (safe) failures.push("dir-ownership-check");
-    fs.rmSync(evil, { recursive: true, force: true });
-    await run("sudo", ["-n", "rm", "-rf", evil]);
+    await run("sudo", ["-n", "rm", "-rf", evil]); // sticky /tmp: only the owner may remove it
   } else {
     ev(
       "dir-ownership-check",

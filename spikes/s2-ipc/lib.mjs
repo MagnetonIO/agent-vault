@@ -183,6 +183,7 @@ export async function runAsOther(script, args, outFile, { wait = true } = {}) {
       ...(wait ? ["-Wait"] : []),
     ),
   );
+  console.log(`  as-other(${script}): ${(r.stdout + r.stderr).trim().replaceAll("\n", " | ")}`);
   return r;
 }
 

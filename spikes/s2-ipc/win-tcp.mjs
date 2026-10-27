@@ -30,13 +30,28 @@ const expect = (id, cond, detail) => {
   if (!cond) failures.push(id);
 };
 
-/** Restrict `target` to the current user only. Exact commands later tasks must reuse. */
+/**
+ * Restrict `target` to the current user only. Exact commands later tasks must reuse.
+ * `/inheritance:r` + `/grant:r` alone left explicit SYSTEM/Administrators ACEs on a directory
+ * (see run log), so every other principal icacls still lists is then removed by name.
+ */
 async function lockDown(target, isDir) {
   const grant = isDir ? `${USER}:(OI)(CI)F` : `${USER}:F`;
-  const args = [target, "/inheritance:r", "/grant:r", grant];
-  const r = await run("icacls", args);
-  console.log(`  $ icacls ${args.map((a) => `"${a}"`).join(" ")}\n${indent(r.stdout + r.stderr)}`);
-  return r;
+  const steps = [[target, "/inheritance:r", "/grant:r", grant]];
+  for (const args of steps) {
+    const r = await run("icacls", args);
+    console.log(
+      `  $ icacls ${args.map((a) => `"${a}"`).join(" ")}\n${indent(r.stdout + r.stderr)}`,
+    );
+  }
+  for (const who of principals(await icacls(target), target)) {
+    if (who.toLowerCase().endsWith(USER.toLowerCase())) continue;
+    const args = [target, "/remove", who];
+    const r = await run("icacls", args);
+    console.log(
+      `  $ icacls ${args.map((a) => `"${a}"`).join(" ")}\n${indent(r.stdout + r.stderr)}`,
+    );
+  }
 }
 
 const icacls = async (target) => (await run("icacls", [target])).stdout;
