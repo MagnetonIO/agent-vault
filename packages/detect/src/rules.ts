@@ -49,7 +49,15 @@ export const RULES: readonly Rule[] = [
     id: "pem",
     namePrefix: "pem/private-key",
     priority: 20,
-    pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+    // BEGIN line, then base64 / `Proc-Type:` / `DEK-Info:` lines, then the END line if there
+    // is one. A truncated key (no END) stops at the first blank or non-base64 line, so half
+    // a pasted key is still caught without swallowing the prose after it.
+    pattern: new RegExp(
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----" +
+        "(?:\\r?\\n[ \\t]*(?:[A-Za-z0-9+/=]+|(?:Proc-Type|DEK-Info):[^\\r\\n]*)[ \\t]*(?=\\r?\\n|$))*" +
+        "(?:\\r?\\n[ \\t]*-----END [A-Z ]*PRIVATE KEY-----)?",
+      "g",
+    ),
   },
   {
     id: "anthropic",

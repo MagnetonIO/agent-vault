@@ -88,6 +88,36 @@ describe("rules", () => {
     expect(d.value).toBe(fakes.pem());
   });
 
+  test("pem truncated mid-body is still detected, BEGIN line through last body line", () => {
+    const full = fakes.pem().split("\n");
+    const truncated = full.slice(0, 3).join("\n");
+    const text = `here is my key:\n${truncated}`;
+    const d = one(text);
+    expect(d.ruleId).toBe("pem");
+    expect(d.value).toBe(truncated);
+    expect(text.slice(d.start, d.end)).toBe(truncated);
+  });
+
+  test("pem BEGIN line followed by prose: span ends before the prose", () => {
+    const lines = fakes.pem().split("\n");
+    const key = lines.slice(0, 2).join("\n");
+    const text = `${key}\nOops, that got cut off. Can you still help?`;
+    const d = one(text);
+    expect(d.ruleId).toBe("pem");
+    expect(text.slice(d.start, d.end)).toBe(key);
+    expect(d.value).not.toContain("Oops");
+  });
+
+  test("pem truncated at a blank line stops there; Proc-Type headers are included", () => {
+    const lines = fakes.pem().split("\n");
+    const key = [lines[0], "Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-128-CBC,00", lines[1]].join(
+      "\n",
+    );
+    const text = `${key}\n\n${lines[2]}`;
+    const pem = detectSecrets(text, { now: NOW }).find((x) => x.ruleId === "pem");
+    expect(pem && text.slice(pem.start, pem.end)).toBe(key);
+  });
+
   test("a sk- inside a longer word is not an openai key", () => {
     expect(detectSecrets("task-abcdefghijklmnopqrstuvwxyz is not a key")).toEqual([]);
   });
