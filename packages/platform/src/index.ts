@@ -11,6 +11,7 @@ export {
   openOsKeyring,
   WrongPassphraseError,
 } from "./keystore.js";
+export { childBaseEnv, PASSPHRASE_ENV } from "./passphrase-env.js";
 export type { VaultPaths } from "./paths.js";
 export { getPaths } from "./paths.js";
 export { ensurePrivateDir, icaclsCommands, icaclsExe } from "./private-dir.js";

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { type BundleInfo, parseEnvFile, type SecretMeta } from "@agent-vault/core";
+import { type BundleInfo, isValidEnvName, parseEnvFile, type SecretMeta } from "@agent-vault/core";
 import type { IpcClient } from "@agent-vault/daemon";
 import { detectSecrets, fingerprint } from "@agent-vault/detect";
 import { getPaths } from "@agent-vault/platform";
@@ -21,7 +21,6 @@ import { parseWrapper, WRAPPER, wrapArgv } from "./wrap.js";
 
 export { sanitizeName } from "./names.js";
 
-const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const VAULT_PREFIX = "vault://";
 
 export type MigrateClient = Pick<IpcClient, "call">;
@@ -248,7 +247,7 @@ function planServers(
     const serverPath = serverPathOf(first);
     const grants = new Map(items.map((f) => [f.envName, names.get(f) as string]));
     for (const env of grants.keys()) {
-      if (!ENV_NAME_RE.test(env)) {
+      if (!isValidEnvName(env)) {
         throw new Error(`${server}: ${env} cannot be an environment variable name in a bundle`);
       }
     }

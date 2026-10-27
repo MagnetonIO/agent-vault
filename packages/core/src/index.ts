@@ -26,4 +26,11 @@ export { parseEnvFile, parseRef } from "./refs.js";
 export type { ScrubRow } from "./scrub-queue.js";
 export { deleteScrubRows, enqueueScrub, listScrubQueue } from "./scrub-queue.js";
 export type { SecretMeta } from "./vault.js";
-export { initVault, openVault, recoverVault, Vault } from "./vault.js";
+export {
+  initVault,
+  isValidEnvName,
+  isValidName,
+  openVault,
+  recoverVault,
+  Vault,
+} from "./vault.js";

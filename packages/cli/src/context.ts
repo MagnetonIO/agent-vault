@@ -7,7 +7,7 @@ import {
   RpcError,
   recoveryInProgress,
 } from "@agent-vault/daemon";
-import { getPaths, ipcEndpoint, type VaultPaths } from "@agent-vault/platform";
+import { childBaseEnv, getPaths, ipcEndpoint, type VaultPaths } from "@agent-vault/platform";
 import {
   EXIT_WRONG_PASSPHRASE,
   keyfilePath,
@@ -34,12 +34,6 @@ export type DaemonOptions = {
 };
 
 export const RECOVERY_IN_PROGRESS = "vault recovery in progress";
-
-/** This process's environment without the passphrase: a spawned daemon must never inherit it. */
-function spawnEnv(): NodeJS.ProcessEnv {
-  const { [PASSPHRASE_ENV]: _passphrase, ...rest } = process.env;
-  return rest;
-}
 
 /**
  * A connection to vaultd, starting the daemon first if none runs. A keyfile daemon needs its
@@ -70,7 +64,8 @@ export async function daemonClient(
   }
   try {
     return await ensureDaemon(paths, {
-      env: spawnEnv(),
+      // A spawned daemon must never inherit the passphrase.
+      env: childBaseEnv(),
       ...(stdinPayload !== undefined && { stdinPayload }),
       ...(opts.spawnArgv !== undefined && { spawnArgv: opts.spawnArgv }),
       ...(opts.recovering && { extraArgs: ["--recovering"] }),

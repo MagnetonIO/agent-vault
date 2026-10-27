@@ -5,6 +5,7 @@ import {
   appendAudit,
   deleteScrubRows,
   enqueueScrub,
+  isValidName,
   listScrubQueue,
   type ScrubRow,
   SecretNotFoundError,
@@ -14,7 +15,7 @@ import { deviceId, HARNESSES, type Harness } from "../device.js";
 import { SecretNotTextError } from "../errors.js";
 import { type FileProblem, type ScrubOptions, scrubFiles } from "../scrubber.js";
 import { decodeSecretText } from "../secret-text.js";
-import { invalid, isValidName, paramsObject } from "./params.js";
+import { invalid, paramsObject } from "./params.js";
 import type { Registry } from "./types.js";
 
 /** Same floor as the redactor: shorter values cannot be replaced without mangling ordinary text. */

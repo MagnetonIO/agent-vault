@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { IpcClient } from "@agent-vault/daemon";
+import { childBaseEnv } from "@agent-vault/platform";
 import type { Command } from "commander";
-import { PASSPHRASE_ENV } from "../config.js";
 import { withDaemon } from "../context.js";
 import { CliError, exitWith } from "../errors.js";
 import { collect } from "./set.js";
@@ -27,15 +27,6 @@ export function parseEnvRefs(pairs: string[]): Record<string, string> {
       writable: true,
       configurable: true,
     });
-  }
-  return env;
-}
-
-/** This process's environment as the child's base. The keyfile passphrase is not handed on. */
-function baseEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && key !== PASSPHRASE_ENV) env[key] = value;
   }
   return env;
 }
@@ -111,7 +102,7 @@ export function runCommand(program: Command): void {
               runId,
               argv,
               cwd: process.cwd(),
-              baseEnv: baseEnv(),
+              baseEnv: childBaseEnv(),
               ...(opts.bundle !== undefined && { bundle: opts.bundle }),
               ...(opts.envFile !== undefined && { envFile: path.resolve(opts.envFile) }),
               ...(Object.keys(env).length > 0 && { env }),

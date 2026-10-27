@@ -12,7 +12,7 @@ export const KEYSTORE_CHOICES: readonly KeystoreChoice[] = ["os", "keyfile"];
 export const STORE_KIND: Record<KeystoreChoice, string> = { os: "os-keyring", keyfile: "keyfile" };
 
 /** The headless unlock for the keyfile store (AGENTS.md). Never used for a secret. */
-export const PASSPHRASE_ENV = "AGENT_VAULT_KEYFILE_PASSPHRASE";
+export { PASSPHRASE_ENV } from "@agent-vault/platform";
 
 /** `daemon run` exits with this when the keyfile passphrase is wrong; a spawner reads it. */
 export const EXIT_WRONG_PASSPHRASE = 3;

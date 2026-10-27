@@ -1,7 +1,6 @@
-import { isValidName } from "./vault.js";
+import { isValidEnvName, isValidName } from "./vault.js";
 
 const SCHEME = "vault://";
-const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export type EnvEntry = { key: string; ref?: string; literal?: string; line: number };
 
@@ -66,7 +65,7 @@ export function parseEnvFile(text: string): EnvEntry[] {
     const eq = body.indexOf("=");
     if (eq === -1) return;
     const key = body.slice(0, eq).trim();
-    if (!ENV_KEY_RE.test(key)) return;
+    if (!isValidEnvName(key)) return;
     const value = parseValue(body.slice(eq + 1));
     const ref = parseRef(value);
     out.push(ref === null ? { key, literal: value, line: i + 1 } : { key, ref, line: i + 1 });

@@ -67,6 +67,13 @@ export function isValidName(name: unknown): name is string {
   return typeof name === "string" && name.length <= NAME_MAX && NAME_RE.test(name);
 }
 
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** True if `name` can be an environment variable name: `[A-Za-z_][A-Za-z0-9_]*`. */
+export function isValidEnvName(name: unknown): name is string {
+  return typeof name === "string" && ENV_NAME_RE.test(name);
+}
+
 export function assertName(name: string): void {
   if (!isValidName(name)) throw new InvalidNameError(String(name));
 }

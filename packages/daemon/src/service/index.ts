@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ensurePrivateDir, getPaths, type VaultPaths } from "@agent-vault/platform";
+import { ensurePrivateDir, getPaths, PASSPHRASE_ENV, type VaultPaths } from "@agent-vault/platform";
 import { daemonRunArgv } from "../autostart.js";
 import { ServiceError } from "./errors.js";
 import * as launchd from "./launchd.js";
@@ -12,7 +12,6 @@ import * as systemd from "./systemd.js";
 export { ServiceError } from "./errors.js";
 
 /** The headless unlock for the keyfile store. Read only to see whether it is set; never written. */
-const KEYFILE_PASSPHRASE_ENV = "AGENT_VAULT_KEYFILE_PASSPHRASE";
 
 export type CommandRunner = (argv: readonly string[]) => Promise<{ code: number; stderr: string }>;
 
@@ -119,10 +118,10 @@ async function installTask(o: ServiceOptions, r: Resolved, argv: readonly string
 
 export async function installService(o: InstallOptions): Promise<ServiceResult> {
   const r = resolve(o);
-  const passphraseSet = Boolean(r.env[KEYFILE_PASSPHRASE_ENV]);
+  const passphraseSet = Boolean(r.env[PASSPHRASE_ENV]);
   if (o.keystore === "keyfile" && !passphraseSet) {
     throw new ServiceError(
-      `the keyfile store needs a passphrase at daemon start; use --keystore os or set ${KEYFILE_PASSPHRASE_ENV} in the service environment yourself`,
+      `the keyfile store needs a passphrase at daemon start; use --keystore os or set ${PASSPHRASE_ENV} in the service environment yourself`,
     );
   }
   const argv = o.argv ?? daemonRunArgv();
@@ -132,7 +131,7 @@ export async function installService(o: InstallOptions): Promise<ServiceResult> 
   const notes = [`The service pins ${argv[0]}; reinstall after upgrading Node.`];
   if (o.keystore === "keyfile") {
     warnings.push(
-      `WARNING: the passphrase is not written to the service. Unless ${KEYFILE_PASSPHRASE_ENV} is in the service's own environment, the daemon cannot unlock the keyfile store and will exit at start.`,
+      `WARNING: the passphrase is not written to the service. Unless ${PASSPHRASE_ENV} is in the service's own environment, the daemon cannot unlock the keyfile store and will exit at start.`,
     );
   }
 

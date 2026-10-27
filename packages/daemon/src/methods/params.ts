@@ -1,14 +1,9 @@
+import { isValidName } from "@agent-vault/core";
 import { RpcError } from "../errors.js";
 import { ERR } from "../rpc.js";
 
-/** Same rule as the vault's secret names (global constraints); bundles use it too. */
-const NAME_RE = /^[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*$/;
-const NAME_MAX = 128;
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 const KEY_ECHO_RE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
-
-export const isValidName = (name: unknown): name is string =>
-  typeof name === "string" && name.length <= NAME_MAX && NAME_RE.test(name);
 
 /** Messages name the field and the rule, never the offending value. */
 export const invalid = (field: string, rule: string): RpcError =>

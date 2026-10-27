@@ -10,13 +10,11 @@ import {
   MetadataTamperError,
   SecretNotFoundError,
 } from "./errors.js";
-import { assertName, lengthPrefixed, type Vault, vaultInternals } from "./vault.js";
+import { assertName, isValidEnvName, lengthPrefixed, type Vault, vaultInternals } from "./vault.js";
 
 export type BundleInfo = { name: string; env: Record<string, string>; exes: string[] };
 
 type BundleRow = { id: string; name: string; meta_mac: Uint8Array };
-
-const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -115,7 +113,7 @@ export function createBundle(v: Vault, name: string): void {
 /** Map env var `env` to `secret` in the bundle, replacing any earlier mapping of that env name. */
 export function grant(v: Vault, bundle: string, g: { env: string; secret: string }): void {
   vaultInternals(v);
-  if (typeof g.env !== "string" || !ENV_NAME_RE.test(g.env)) {
+  if (!isValidEnvName(g.env)) {
     throw new InvalidEnvNameError(String(g.env));
   }
   if (!v.has(g.secret)) throw new SecretNotFoundError(g.secret);

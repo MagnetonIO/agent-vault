@@ -3,10 +3,10 @@ import { randomBytes, randomUUID } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
-import { appendAudit, VaultClosedError } from "@agent-vault/core";
+import { appendAudit, isValidName, VaultClosedError } from "@agent-vault/core";
 import { detectSecrets } from "@agent-vault/detect";
 import { deviceId, type Harness } from "./device.js";
-import { isValidName } from "./methods/params.js";
+
 import { storeSecret } from "./methods/secret.js";
 import type { DaemonState } from "./methods/types.js";
 

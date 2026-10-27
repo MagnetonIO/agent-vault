@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { BundleInfo, SecretMeta } from "@agent-vault/core";
 import { type IpcClient, RpcError } from "@agent-vault/daemon";
+import { childBaseEnv } from "@agent-vault/platform";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
@@ -130,15 +131,6 @@ class CappedText {
     const text = this.#parts.join("");
     return this.#dropped > 0 ? `${text}\n…[truncated ${this.#dropped} bytes]` : text;
   }
-}
-
-/** This server's environment as the child's base. The keyfile passphrase is not handed on. */
-function baseEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && key !== "AGENT_VAULT_KEYFILE_PASSPHRASE") env[key] = value;
-  }
-  return env;
 }
 
 type CaptureBegin = { url: string; elicitationId: string; expiresAt: string };
@@ -409,7 +401,7 @@ async function run(
           runId,
           argv,
           cwd: process.cwd(),
-          baseEnv: baseEnv(),
+          baseEnv: childBaseEnv(),
           bundle,
           harness: ctx.harness(),
         },

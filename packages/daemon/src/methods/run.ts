@@ -1,21 +1,12 @@
 import path from "node:path";
-import { appendAudit, parseRef, type Vault } from "@agent-vault/core";
+import { appendAudit, isValidEnvName, isValidName, parseRef, type Vault } from "@agent-vault/core";
 import { deviceId, type Harness, harnessOf } from "../device.js";
 import { ExeNotAllowedError, RunError } from "../errors.js";
 import { type FailedAt, type PreparedRun, prepareRun, type RunParams } from "../runner.js";
-import {
-  invalid,
-  isValidName,
-  optName,
-  optString,
-  paramsObject,
-  reqBase64,
-  reqString,
-} from "./params.js";
+import { invalid, optName, optString, paramsObject, reqBase64, reqString } from "./params.js";
 import type { Registry } from "./types.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGKILL"] as const;
 
 type Params = Record<string, unknown>;
@@ -77,7 +68,7 @@ function parseStart(params: unknown): RunParams {
     refs = {};
     for (const [key, value] of Object.entries(stringMap(p.env, "env", rule))) {
       const secret = parseRef(value);
-      if (!ENV_KEY_RE.test(key) || secret === null) throw invalid("env", rule);
+      if (!isValidEnvName(key) || secret === null) throw invalid("env", rule);
       Object.defineProperty(refs, key, {
         value: secret,
         enumerable: true,

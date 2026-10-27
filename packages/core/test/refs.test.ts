@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { isValidEnvName, isValidName } from "../src/index.js";
 import { parseEnvFile, parseRef } from "../src/refs.js";
 
 describe("parseRef", () => {
@@ -186,5 +187,22 @@ describe("parseEnvFile", () => {
   test("never throws on junk", () => {
     expect(() => parseEnvFile("\0\0=\n\"\n'\n=\n\\")).not.toThrow();
     expect(parseEnvFile("")).toEqual([]);
+  });
+});
+
+describe("isValidName / isValidEnvName (the one copy every package uses)", () => {
+  test("secret names", () => {
+    for (const ok of ["a", "github/pat-20261027", "mcp/x.y_z"])
+      expect(isValidName(ok), ok).toBe(true);
+    for (const bad of ["", "A", "/a", "a/", "a//b", "-a", "a".repeat(129), 7]) {
+      expect(isValidName(bad), String(bad)).toBe(false);
+    }
+  });
+
+  test("env names", () => {
+    for (const ok of ["A", "_x", "API_KEY2"]) expect(isValidEnvName(ok), ok).toBe(true);
+    for (const bad of ["", "2A", "A-B", "A B", null]) {
+      expect(isValidEnvName(bad), String(bad)).toBe(false);
+    }
   });
 });
