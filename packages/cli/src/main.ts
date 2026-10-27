@@ -5,12 +5,15 @@ import { auditCommand } from "./commands/audit.js";
 import { bundleCommand } from "./commands/bundle.js";
 import { daemonCommand } from "./commands/daemon.js";
 import { grabCommand } from "./commands/grab.js";
+import { guardCommand } from "./commands/guard.js";
 import { helperCommand } from "./commands/helper.js";
 import { initCommand } from "./commands/init.js";
 import { listCommand } from "./commands/list.js";
+import { importCommand, migrateCommand } from "./commands/migrate.js";
 import { recoverCommand } from "./commands/recover.js";
 import { rmCommand } from "./commands/rm.js";
 import { runCommand } from "./commands/run.js";
+import { scanCommand } from "./commands/scan.js";
 import { setCommand } from "./commands/set.js";
 import { statusCommand } from "./commands/status.js";
 import { describeError } from "./context.js";
@@ -36,6 +39,10 @@ for (const register of [
   rmCommand,
   runCommand,
   bundleCommand,
+  migrateCommand,
+  importCommand,
+  scanCommand,
+  guardCommand,
   auditCommand,
   helperCommand,
   daemonCommand,
