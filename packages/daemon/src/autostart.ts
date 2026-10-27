@@ -7,12 +7,19 @@ import { DaemonIdentityError } from "./errors.js";
 import { lockPath } from "./lock.js";
 
 const RETRY_INTERVAL_MS = 100;
-const DEFAULT_TIMEOUT_MS = 3000;
+
+/**
+ * How long a cold start may take. On Windows a start runs `icacls` four times (two per private dir,
+ * 150-500 ms each on a CI runner) on top of node's own start-up: 1.9 s in total on a quiet runner,
+ * past 3 s when other test files compete for the CPU.
+ */
+export const defaultTimeoutMs = (platform: NodeJS.Platform = process.platform): number =>
+  platform === "win32" ? 10_000 : 3000;
 
 export type EnsureDaemonOptions = {
   /** Command that runs the daemon. Default: the running CLI's `daemon run`. */
   spawnArgv?: string[] | undefined;
-  /** How long to wait for a spawned daemon. Default 3000. */
+  /** How long to wait for a spawned daemon. Default `defaultTimeoutMs()`: 3000, 10000 on Windows. */
   timeoutMs?: number | undefined;
 };
 
@@ -40,7 +47,7 @@ export async function ensureDaemon(
 
   const [cmd, ...args] = opts.spawnArgv ?? defaultArgv();
   if (!cmd) throw new Error("spawnArgv is empty");
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   const child = spawn(cmd, args, { detached: true, stdio: "ignore", windowsHide: true });
   let spawnError: Error | undefined;
   child.on("error", (err) => {

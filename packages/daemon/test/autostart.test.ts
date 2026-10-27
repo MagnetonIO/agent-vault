@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ipcEndpoint } from "@agent-vault/platform";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { ensureDaemon } from "../src/autostart.js";
+import { defaultTimeoutMs, ensureDaemon } from "../src/autostart.js";
 import { connect } from "../src/client.js";
 import { useTmp } from "./helpers.js";
 
@@ -27,7 +27,7 @@ describe("ensureDaemon", () => {
     vi.unstubAllEnvs();
   });
 
-  test("spawns the daemon when none runs, and connects within 3 s", async () => {
+  test("spawns the daemon when none runs, and connects within the default timeout", async () => {
     const endpoint = ipcEndpoint(tmp.paths);
     await expect(connect(endpoint)).rejects.toThrow();
 
@@ -36,7 +36,7 @@ describe("ensureDaemon", () => {
       spawnArgv: [process.execPath, "--import", tsxLoader, fixture],
     });
     try {
-      expect(Date.now() - started).toBeLessThan(3000);
+      expect(Date.now() - started).toBeLessThan(defaultTimeoutMs());
       expect(await client.call("status")).toEqual({
         initialized: false,
         keystore: "keyfile",
