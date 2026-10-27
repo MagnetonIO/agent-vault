@@ -6,7 +6,7 @@ import { describe, expect, test, vi } from "vitest";
 import { connect, type IpcClient } from "../src/client.js";
 import { RpcError } from "../src/errors.js";
 import { type Registry, registry } from "../src/methods/index.js";
-import { b64, MODES, useDaemon } from "./helpers.js";
+import { b64, MODES, RawPeer, type Reply, useDaemon } from "./helpers.js";
 
 // Every test here starts real processes; a Windows runner needs far longer than the 5 s default.
 vi.setConfig({ testTimeout: 30_000 });
@@ -418,6 +418,133 @@ describe.each(MODES)("run and helper over %s", (mode) => {
     });
   });
 
+  describe("process trees", () => {
+    /** A child that starts a grandchild (once it is up) and prints "<child pid> <grandchild pid>". */
+    const withGrandchild = (ignoreSigterm: boolean): string[] =>
+      nodeE(
+        `const { spawn } = require("child_process");
+const g = spawn(process.execPath, ["-e", process.argv[1] + "console.log('ready'); setInterval(() => {}, 1000)"], { stdio: ["ignore", "pipe", "ignore"] });
+g.stdout.once("data", () => { console.log(process.pid + " " + g.pid); });
+setInterval(() => {}, 1000);`,
+        ignoreSigterm ? "process.on('SIGTERM', () => {});" : "",
+      );
+    const pidsOf = (run: Run) =>
+      run.seen("stdout", "\n").then(() => run.out.stdout.trim().split(" ").map(Number));
+
+    test.runIf(POSIX)("disconnecting kills the whole process group", async () => {
+      const owner = await connect(env.endpoint);
+      const run = startRun(owner, { argv: withGrandchild(false) });
+      const [child, grandchild] = await pidsOf(run);
+      expect(pidGone(grandchild as number)).toBe(false);
+      owner.close();
+      expect(await waitGone(child as number, 6000)).toBe(true);
+      expect(await waitGone(grandchild as number, 6000)).toBe(true);
+    });
+
+    test.runIf(POSIX)("run.signal reaches the grandchild too", async () => {
+      const run = startRun(env.client, { argv: withGrandchild(false) });
+      const [child, grandchild] = await pidsOf(run);
+      await env.client.call("run.signal", { runId: run.runId, signal: "SIGTERM" });
+      await run.result;
+      expect(await waitGone(child as number, 6000)).toBe(true);
+      expect(await waitGone(grandchild as number, 6000)).toBe(true);
+    });
+
+    test.runIf(POSIX && mode === MODES[0])(
+      "a grandchild that ignores SIGTERM is SIGKILLed even after its parent is gone",
+      async () => {
+        const owner = await connect(env.endpoint);
+        const run = startRun(owner, { argv: withGrandchild(true) });
+        const [child, grandchild] = await pidsOf(run);
+        owner.close();
+        expect(await waitGone(child as number, 3000)).toBe(true);
+        expect(pidGone(grandchild as number)).toBe(false);
+        expect(await waitGone(grandchild as number, 6000)).toBe(true);
+      },
+    );
+
+    test.runIf(POSIX)("daemon.close kills the whole process group", async () => {
+      const run = startRun(env.client, { argv: withGrandchild(false) });
+      const [child, grandchild] = await pidsOf(run);
+      await env.daemon.close();
+      expect(pidGone(child as number)).toBe(true);
+      expect(await waitGone(grandchild as number, 1000)).toBe(true);
+      await run.result.catch(() => {});
+    });
+  });
+
+  describe("backpressure", () => {
+    const MiB = 1024 * 1024;
+    const CHUNKS = 800;
+    const LINES_PER_CHUNK = 64;
+    // About 50 MB: lines of 1000 filler chars, the token and a newline, written as fast as the pipe allows.
+    const FLOOD = `const t = process.env.TOKEN;
+const chunk = ("a".repeat(1000) + t + "\\n").repeat(${LINES_PER_CHUNK});
+let i = 0;
+(function go() {
+  while (i < ${CHUNKS}) {
+    i++;
+    if (!process.stdout.write(chunk)) return void process.stdout.once("drain", go);
+  }
+})();`;
+
+    test.runIf(mode === MODES[0])(
+      "a client that stops reading does not make the daemon buffer the output",
+      async () => {
+        await put("t", SECRET);
+        const peer = await RawPeer.open(env.endpoint);
+        peer.socket.pause(); // reads nothing until we say so
+        const baseline = process.memoryUsage().rss;
+        peer.send(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "run.start",
+            params: {
+              runId: randomUUID(),
+              cwd: process.cwd(),
+              baseEnv,
+              argv: nodeE(FLOOD),
+              env: { TOKEN: "vault://t" },
+            },
+          })}\n`,
+        );
+        let peak = baseline;
+        for (let i = 0; i < 30; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+          peak = Math.max(peak, process.memoryUsage().rss);
+        }
+        expect(peak - baseline).toBeLessThan(20 * MiB);
+
+        // Now read it all, slowly at first, and check nothing was lost or leaked.
+        peer.socket.resume();
+        let length = 0;
+        let redactions = 0;
+        let leaked = false;
+        let reply: Reply | undefined;
+        while (!reply) {
+          const line = await peer.line(30_000);
+          if (line === null) throw new Error("connection ended early");
+          const msg = JSON.parse(line) as Reply & { method?: string; params?: { data: string } };
+          if (msg.method === "run.output") {
+            const data = (msg.params as { data: string }).data;
+            length += data.length;
+            redactions += data.split("[redacted vault://t]").length - 1;
+            leaked ||= data.includes(SECRET);
+          } else {
+            reply = msg;
+          }
+        }
+        peer.destroy();
+        expect(reply.result).toEqual({ exitCode: 0 });
+        expect(leaked).toBe(false);
+        expect(redactions).toBe(CHUNKS * LINES_PER_CHUNK);
+        expect(length).toBe(CHUNKS * LINES_PER_CHUNK * (1000 + "[redacted vault://t]".length + 1));
+      },
+      60_000,
+    );
+  });
+
   describe("exe allowlist", () => {
     const bundleWith = async (name: string, exes: string[]) => {
       await env.client.call("bundle.create", { name });
@@ -553,6 +680,61 @@ describe.each(MODES)("run and helper over %s", (mode) => {
     });
   });
 
+  describe("audit of failures", () => {
+    const runEvents = async () => (await audit()).filter((e) => e.operation === "run");
+
+    test("a missing secret is logged as an error under its name", async () => {
+      await rpcError(
+        startRun(env.client, { argv: nodeE("0"), env: { TOKEN: "vault://nope" } }).result,
+      );
+      const events = await runEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ outcome: "error", secretName: "nope" });
+    });
+
+    test("a stale grant is logged with its bundle and the missing secret", async () => {
+      await put("gone", SECRET);
+      await env.client.call("bundle.create", { name: "stale" });
+      await env.client.call("bundle.grant", { bundle: "stale", env: "TOKEN", secret: "gone" });
+      await env.client.call("secret.remove", { name: "gone" });
+      await rpcError(startRun(env.client, { argv: nodeE("0"), bundle: "stale" }).result);
+      expect(await runEvents()).toMatchObject([
+        { outcome: "error", secretName: "gone", bundle: "stale" },
+      ]);
+    });
+
+    test("a secret that is too short is logged under its name", async () => {
+      await put("tiny", "abc");
+      await rpcError(
+        startRun(env.client, { argv: nodeE("0"), env: { TOKEN: "vault://tiny" } }).result,
+      );
+      expect(await runEvents()).toMatchObject([{ outcome: "error", secretName: "tiny" }]);
+    });
+
+    test("an unresolvable command is logged as an error", async () => {
+      await rpcError(startRun(env.client, { argv: [path.join(env.dir, "missing")] }).result);
+      const events = await runEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ outcome: "error" });
+      expect(events[0]?.secretName).toBeUndefined();
+    });
+
+    test("a literal in env is logged as an error, naming the bundle", async () => {
+      await env.client.call("bundle.create", { name: "b" });
+      const err = await rpcError(
+        startRun(env.client, { argv: nodeE("0"), bundle: "b", env: { TOKEN: "literal" } }).result,
+      );
+      expect(err.code).toBe(-32602);
+      expect(await runEvents()).toMatchObject([{ outcome: "error", bundle: "b" }]);
+      expect(JSON.stringify(await runEvents())).not.toContain("literal");
+    });
+
+    test("params that are not an object name nothing and are not logged", async () => {
+      await rpcError(env.client.call("run.start", []));
+      expect(await runEvents()).toEqual([]);
+    });
+  });
+
   describe("helper.get", () => {
     test("returns the value of a secret tagged helper, and audits it", async () => {
       await put("model/key", "sk-model-key-12345", ["helper"]);
@@ -654,5 +836,20 @@ describe.runIf(process.platform === "win32")("Windows .cmd shims", () => {
     });
     expect(await run.result).toEqual({ exitCode: 0 });
     expect(run.out.stdout).toBe("[redacted vault://t]\n");
+  });
+
+  test("killing a shim's run takes its child process down with it", async () => {
+    fs.writeFileSync(
+      path.join(env.dir, "idle.js"),
+      "console.log(process.pid); setInterval(() => {}, 1000)",
+    );
+    fs.writeFileSync(path.join(env.dir, "idle.cmd"), `@"${NODE}" "%~dp0idle.js"\r\n`);
+    const owner = await connect(env.endpoint);
+    const run = startRun(owner, { argv: [path.join(env.dir, "idle.cmd")], cwd: env.dir });
+    await run.seen("stdout", "\n");
+    const pid = Number(run.out.stdout.trim());
+    expect(pidGone(pid)).toBe(false);
+    owner.close();
+    expect(await waitGone(pid, 6000)).toBe(true);
   });
 });

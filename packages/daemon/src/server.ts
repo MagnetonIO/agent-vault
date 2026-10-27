@@ -227,7 +227,10 @@ function serveConnection({ socket, token, dispatch, limits }: Conn): void {
     return;
   }
   // Runs started on this connection end with it.
-  const connection = new Connection();
+  const connection = new Connection({
+    blocked: () => socket.writableNeedDrain,
+    onDrain: (fn) => void socket.once("drain", fn),
+  });
   socket.once("close", () => connection.close());
   // Where this connection is counted: pending until the handshake passes (unix: never pending).
   let authenticated = token === null;

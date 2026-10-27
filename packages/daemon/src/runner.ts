@@ -1,4 +1,4 @@
-import type { ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn as spawnDirect } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -107,6 +107,9 @@ function realpathOrUndefined(p: string): string | undefined {
 
 type Slot = { secret: string } | { literal: string };
 
+/** Filled in by `prepareRun` with the secret it was working on, so a failure can be audited. */
+export type FailedAt = { secretName?: string | undefined };
+
 /** The secret as an env var value: UTF-8 text without NUL. The decrypted bytes are zeroed. */
 function readSecretText(vault: Vault, name: string): string {
   const bytes = vault.readValue(name);
@@ -131,7 +134,7 @@ function readSecretText(vault: Vault, name: string): string {
  * The child is started from the path that was checked, so a `PATH` set by a grant or an env file
  * cannot send it to a different program than the one the allowlist saw.
  */
-export function prepareRun(vault: Vault, p: RunParams): PreparedRun {
+export function prepareRun(vault: Vault, p: RunParams, at: FailedAt = {}): PreparedRun {
   const argv0 = p.argv[0] as string;
   const bundle = p.bundle === undefined ? undefined : resolveBundle(vault, p.bundle);
 
@@ -181,18 +184,23 @@ export function prepareRun(vault: Vault, p: RunParams): PreparedRun {
   const values = new Map<string, string>();
   for (const slot of plan.values()) {
     if ("secret" in slot && !values.has(slot.secret)) {
+      at.secretName = slot.secret;
       values.set(slot.secret, readSecretText(vault, slot.secret));
+      at.secretName = undefined;
     }
   }
   const secrets = [...values].map(([name, value]) => ({ name, value }));
-  let redactors: PreparedRun["redactors"];
-  try {
-    redactors = { stdout: createRedactor(secrets), stderr: createRedactor(secrets) };
-  } catch (err) {
-    // The message names the secret that is too short, never its value.
-    if (err instanceof RangeError) throw new RunError(err.message);
-    throw err;
+  for (const s of secrets) {
+    try {
+      createRedactor([s]);
+    } catch (err) {
+      // The message names the secret that is too short, never its value.
+      at.secretName = s.name;
+      if (err instanceof RangeError) throw new RunError(err.message);
+      throw err;
+    }
   }
+  const redactors = { stdout: createRedactor(secrets), stderr: createRedactor(secrets) };
   const env = Object.fromEntries(
     [...plan].map(([key, slot]) => [
       key,
@@ -238,20 +246,65 @@ export type RunnerService = {
   stdin(owner: Connection, runId: string, data: Buffer | undefined, end: boolean): void;
   /** Send a signal to the child. Only the connection that started the run may. */
   signal(owner: Connection, runId: string, signal: NodeJS.Signals): void;
-  /** SIGTERM every child, SIGKILL the ones still alive after KILL_GRACE_MS, wait for them. */
+  /** SIGTERM every child tree, SIGKILL what is left after KILL_GRACE_MS, wait for them to go. */
   close(): Promise<void>;
 };
 
 const hasExited = (child: ChildProcess): boolean =>
   child.exitCode !== null || child.signalCode !== null;
 
-/** SIGTERM now, SIGKILL after the grace period if it is still running. */
+/** True while the child, or on POSIX anything left in its process group, is still running. */
+function treeAlive(child: ChildProcess): boolean {
+  if (WIN || child.pid === undefined) return !hasExited(child);
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Signal the child and everything it started. POSIX: the child leads its own process group (see
+ * `detached` below), so the signal goes to `-pgid`. Windows has no groups: SIGTERM and SIGKILL run
+ * `taskkill /T /F` on the pid (no shell); a SIGINT cannot be delivered and is plain `kill`.
+ */
+function signalTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  const { pid } = child;
+  if (pid === undefined) return;
+  if (!WIN) {
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      child.kill(signal); // the group is already gone
+    }
+    return;
+  }
+  if (signal === "SIGINT") {
+    child.kill(signal);
+    return;
+  }
+  const root = process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows";
+  const taskkill = path.win32.join(root, "System32", "taskkill.exe");
+  try {
+    const killer = spawnDirect(taskkill, ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    killer.on("error", () => child.kill(signal));
+  } catch {
+    child.kill(signal);
+  }
+}
+
+/** SIGTERM the tree now; SIGKILL whatever is left of it after the grace period. */
 function terminate(entry: Active): void {
   const { child } = entry;
-  if (hasExited(child)) return;
-  child.kill("SIGTERM");
-  entry.killTimer ??= setTimeout(() => {
-    if (!hasExited(child)) child.kill("SIGKILL");
+  if (entry.killTimer !== undefined || !treeAlive(child)) return;
+  signalTree(child, "SIGTERM");
+  // Not cleared when the child exits: its descendants may have ignored the SIGTERM.
+  entry.killTimer = setTimeout(() => {
+    if (treeAlive(child)) signalTree(child, "SIGKILL");
   }, KILL_GRACE_MS);
   entry.killTimer.unref();
 }
@@ -293,12 +346,15 @@ export function createRunnerService(): RunnerService {
 
       let child: ChildProcess;
       try {
+        // cross-spawn escapes arguments for cmd.exe when `command` is a .cmd/.bat shim, with one
+        // known gap: a `%` in an argument is expanded by cmd.exe and is not escaped.
         child = spawn(run.command, run.args, {
           cwd: run.cwd,
           env: run.env,
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
-          ...(!WIN && { argv0: run.argv0 }),
+          // Its own process group on POSIX, so signals reach everything it starts.
+          ...(!WIN && { detached: true, argv0: run.argv0 }),
         });
       } catch {
         // Node's own message can quote the environment, which holds secret values.
@@ -324,15 +380,32 @@ export function createRunnerService(): RunnerService {
       };
       active.set(runId, entry);
       // From here the owner's connection decides how long the child lives.
-      entry.unwatch = owner.onClose(() => terminate(entry));
+      let paused = false;
+      const resumeOutput = () => {
+        paused = false;
+        stdout.resume();
+        stderr.resume();
+      };
+      entry.unwatch = owner.onClose(() => {
+        terminate(entry);
+        resumeOutput(); // nobody is reading; let the streams run dry so the run can finish
+      });
       const forget = () => {
         entry.unwatch();
-        clearTimeout(entry.killTimer);
         if (active.get(runId) === entry) active.delete(runId);
       };
 
       const output = (stream: "stdout" | "stderr") => (data: string) => {
-        if (data !== "") notify("run.output", { runId, stream, data });
+        if (data === "") return;
+        notify("run.output", { runId, stream, data });
+        // A client that is not reading must not make the daemon buffer the child's output: stop
+        // reading the child (its pipe fills and it blocks) until the socket has drained.
+        if (!paused && owner.blocked) {
+          paused = true;
+          stdout.pause();
+          stderr.pause();
+          owner.onceDrained(resumeOutput);
+        }
       };
       const flushed = Promise.all([
         pipeOutput(stdout, run.redactors.stdout, output("stdout")),
@@ -367,14 +440,24 @@ export function createRunnerService(): RunnerService {
     },
 
     signal(owner, runId, signal) {
-      owned(owner, runId).child.kill(signal);
+      signalTree(owned(owner, runId).child, signal);
     },
 
     async close() {
       closed = true;
       const entries = [...active.values()];
+      const deadline = Date.now() + KILL_GRACE_MS;
       for (const entry of entries) terminate(entry);
-      await Promise.all(entries.map((e) => e.exited));
+      await Promise.all(
+        entries.map(async ({ child, exited }) => {
+          await exited;
+          // The child is gone; give what it started the rest of the grace, then kill it.
+          while (treeAlive(child) && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          if (treeAlive(child)) signalTree(child, "SIGKILL");
+        }),
+      );
     },
   };
 }

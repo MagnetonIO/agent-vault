@@ -2,8 +2,16 @@ import path from "node:path";
 import { appendAudit, parseRef, type Vault } from "@agent-vault/core";
 import { deviceId, type Harness, harnessOf } from "../device.js";
 import { ExeNotAllowedError, RunError } from "../errors.js";
-import { type PreparedRun, prepareRun, type RunParams } from "../runner.js";
-import { invalid, optName, optString, paramsObject, reqBase64, reqString } from "./params.js";
+import { type FailedAt, type PreparedRun, prepareRun, type RunParams } from "../runner.js";
+import {
+  invalid,
+  isValidName,
+  optName,
+  optString,
+  paramsObject,
+  reqBase64,
+  reqString,
+} from "./params.js";
 import type { Registry } from "./types.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -127,18 +135,32 @@ export const runMethods: Registry = {
     handler: async (ctx, params) => {
       // Everything up to the spawn is synchronous: the run is registered before the daemon reads
       // the connection's next request, so a `run.stdin` sent right behind this one finds it.
-      const p = parseStart(params);
       const harness = harnessOf(params);
       const vault = ctx.vault();
-      if (ctx.runner.has(p.runId)) throw new RunError("run id already in use");
 
+      let p: RunParams;
+      try {
+        p = parseStart(params);
+      } catch (err) {
+        // Logged unless the params are not even an object, i.e. there is nothing to name.
+        if (typeof params === "object" && params !== null && !Array.isArray(params)) {
+          const bundle = (params as Params).bundle;
+          recordQuietly(vault, harness, "error", {
+            bundle: isValidName(bundle) ? bundle : undefined,
+          });
+        }
+        throw err;
+      }
+      const at: FailedAt = {};
       let prepared: PreparedRun;
       try {
-        prepared = prepareRun(vault, p);
+        if (ctx.runner.has(p.runId)) throw new RunError("run id already in use");
+        prepared = prepareRun(vault, p, at);
       } catch (err) {
-        if (err instanceof ExeNotAllowedError) {
-          recordQuietly(vault, harness, "blocked", { bundle: p.bundle });
-        }
+        recordQuietly(vault, harness, err instanceof ExeNotAllowedError ? "blocked" : "error", {
+          bundle: p.bundle,
+          secretName: at.secretName,
+        });
         throw err;
       }
       // Logged before the child exists: if the log cannot be written, nothing is handed over.
