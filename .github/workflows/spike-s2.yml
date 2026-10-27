@@ -1,0 +1,52 @@
+name: spike-s2
+
+on:
+  push:
+    paths:
+      - "spikes/s2-ipc/**"
+      - ".github/workflows/spike-s2.yml"
+  workflow_dispatch:
+
+jobs:
+  s2:
+    name: s2 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+        working-directory: spikes/s2-ipc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: node --version
+
+      - name: POSIX unix socket (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: node posix.mjs | tee posix.log
+
+      # Second local user: lets the Windows steps test what ANOTHER account can reach. Created as
+      # a standard (non-admin) user; the runner user is an administrator.
+      - name: Create second local user (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $pw = 'Sp1ke-Other-' + [guid]::NewGuid().ToString('N').Substring(0, 12)
+          net user avspike2 $pw /add
+          "SPIKE_OTHER_USER=avspike2" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SPIKE_OTHER_PASS=$pw" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          whoami /user
+          whoami /groups | Select-String 'Mandatory Label'
+
+      - name: Windows named pipe, DACL and squatting
+        if: runner.os == 'Windows'
+        run: node win-pipe.mjs | tee win-pipe.log
+
+      - name: Windows loopback TCP + token file
+        if: runner.os == 'Windows'
+        run: node win-tcp.mjs | tee win-tcp.log

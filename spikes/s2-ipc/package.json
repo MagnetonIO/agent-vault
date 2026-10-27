@@ -1,0 +1,12 @@
+{
+  "name": "agent-vault-spike-s2",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Throwaway spike S2: local IPC access control (unix socket, Windows named pipe, loopback TCP + token)",
+  "scripts": {
+    "posix": "node posix.mjs",
+    "win-pipe": "node win-pipe.mjs",
+    "win-tcp": "node win-tcp.mjs"
+  }
+}
