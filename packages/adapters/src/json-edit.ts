@@ -64,8 +64,9 @@ function edit(text: string, fn: (text: string) => string): string {
   return bom + fn(body.trim() === "" ? "{}\n" : body);
 }
 
+/** The LAST property named `key`: the one `JSON.parse` keeps when a key is repeated. */
 function propertyOf(obj: Node, key: string): Node | undefined {
-  return obj.children?.find((p) => p.children?.[0]?.value === key);
+  return obj.children?.findLast((p) => p.children?.[0]?.value === key);
 }
 
 type Step = { node: Node; prop?: Node };
@@ -121,7 +122,10 @@ function insertChild(text: string, container: Node, key: string | undefined, val
   if (!last) {
     const base = lineIndent(text, open);
     const inner = base + style.unit;
-    return `${text.slice(0, open + 1)}${style.eol}${inner}${entry(inner, true)}${style.eol}${base}${text.slice(close)}`;
+    const head = `${text.slice(0, open + 1)}${style.eol}${inner}${entry(inner, true)}`;
+    // Whatever sits inside the empty container (a comment, a line break) stays after the entry.
+    if (close > open + 1) return head + text.slice(open + 1);
+    return `${head}${style.eol}${base}${text.slice(close)}`;
   }
   const lastEnd = last.offset + last.length;
   if (startsLine(text, last.offset)) {
@@ -131,20 +135,47 @@ function insertChild(text: string, container: Node, key: string | undefined, val
   return `${text.slice(0, lastEnd)},${entry("", false)}${text.slice(lastEnd)}`;
 }
 
-/** Delete `child` from `container`, with the comma and the line break that went with it. */
+const isWs = (ch: string | undefined): boolean =>
+  ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
+
+/**
+ * Delete `child` from `container`, with the comma and the line break that went with it. Comments
+ * are never deleted: a comment between two entries stays with the entry that follows it.
+ */
 function deleteChild(text: string, container: Node, child: Node): string {
   const kids = container.children ?? [];
   const i = kids.indexOf(child);
+  const close = container.offset + container.length - 1;
+  const childEnd = child.offset + child.length;
   if (kids.length === 1) {
-    return (
-      text.slice(0, container.offset + 1) + text.slice(container.offset + container.length - 1)
-    );
+    let start = child.offset;
+    while (start > container.offset + 1 && isWs(text[start - 1])) start--;
+    let after = childEnd;
+    while (after < close && isWs(text[after])) after++;
+    // The white space before the closing bracket goes too, unless a comment follows the entry.
+    return text.slice(0, start) + text.slice(after === close ? after : childEnd);
   }
   if (i < kids.length - 1) {
-    return text.slice(0, child.offset) + text.slice((kids[i + 1] as Node).offset);
+    // From the entry through its comma and the white space after it; a comment there stays.
+    let pos = childEnd;
+    while (isWs(text[pos])) pos++;
+    const end = text[pos] === "," ? pos + 1 : -1;
+    if (end === -1) return text.slice(0, child.offset) + text.slice((kids[i + 1] as Node).offset);
+    let next = end;
+    while (isWs(text[next])) next++;
+    return text.slice(0, child.offset) + text.slice(next);
   }
   const prev = kids[i - 1] as Node;
-  return text.slice(0, prev.offset + prev.length) + text.slice(child.offset + child.length);
+  const prevEnd = prev.offset + prev.length;
+  let comma = prevEnd;
+  while (isWs(text[comma])) comma++;
+  if (text[comma] !== ",") return text.slice(0, prevEnd) + text.slice(childEnd);
+  const between = text.slice(comma + 1, child.offset);
+  if (between.trim() === "") return text.slice(0, prevEnd) + text.slice(childEnd);
+  // A comment sits between the comma and the entry: keep it, drop the comma and the entry.
+  let wsStart = child.offset;
+  while (wsStart > comma + 1 && isWs(text[wsStart - 1])) wsStart--;
+  return text.slice(0, prevEnd) + text.slice(comma + 1, wsStart) + text.slice(childEnd);
 }
 
 /** Set the value at `path`: replaced if it exists, added (with any objects above it) if not. */
@@ -188,19 +219,39 @@ export function appendAt(text: string, path: JsonPath, value: unknown): string {
   });
 }
 
+/** Says whether the container at this path was created by an insert, so a remove may take it. */
+export type PruneFn = (containerPath: JsonPath) => boolean;
+
 /**
- * Remove what is at `path`. A container that this leaves empty goes too, up to (not including)
- * the top-level object, so what an insert created is removed with it. A missing path is a no-op.
+ * Remove what is at `path`. A container that this leaves empty goes too if `prune` says an insert
+ * created it, up to (not including) the top-level object. Without `prune` only the entry goes. A
+ * missing path is a no-op.
  */
-export function removeAt(text: string, path: JsonPath): string {
+export function removeAt(text: string, path: JsonPath, prune?: PruneFn): string {
   return edit(text, (body) => {
     const { found, missingAt } = walk(tree(body), path);
     if (missingAt !== -1) return body;
-    // Climb while the parent would be left empty.
     let level = found.length - 1;
-    while (level > 1 && (found[level - 1] as Step).node.children?.length === 1) level--;
+    while (
+      prune &&
+      level > 1 &&
+      (found[level - 1] as Step).node.children?.length === 1 &&
+      prune(path.slice(0, level - 1))
+    ) {
+      level--;
+    }
     const child = found[level] as Step;
     const container = (found[level - 1] as Step).node;
     return deleteChild(body, container, child.prop ?? child.node);
   });
+}
+
+/**
+ * The containers along `path` (prefixes of it, root excluded) that `text` does not have yet: what
+ * an insert at `path` would create. Pass the path of the array or object that receives the entry.
+ */
+export function missingContainers(text: string, path: JsonPath): JsonPath[] {
+  const { missingAt } = walk(tree(text.trim() === "" ? "{}" : text.replace(/^\uFEFF/, "")), path);
+  if (missingAt === -1) return [];
+  return path.slice(missingAt).map((_, k) => path.slice(0, missingAt + k + 1));
 }

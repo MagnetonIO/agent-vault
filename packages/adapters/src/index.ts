@@ -17,6 +17,7 @@ export {
   createClaudeCodeAdapter,
   type ProbeRunner,
   tagFirst,
+  versionManagerOf,
 } from "./claude-code.js";
 export {
   CHAINED_HOOK,
@@ -31,10 +32,12 @@ export {
 } from "./guard.js";
 export {
   EXPOSED_TAG,
-  HELD_BACK_REASON,
+  HOOK_DEADLINE_MS,
   type HookClient,
   handlePromptSubmit,
   handleScrub,
+  heldBackReason,
+  OVERSIZE_REASON,
   type PromptDecision,
   type PromptSubmitOptions,
   SCRUB_TIMEOUT_MS,
@@ -43,6 +46,8 @@ export {
 } from "./hook.js";
 export {
   addHooks,
+  addHooksTracked,
+  type CommandMatch,
   findHooks,
   type HookEntry,
   type HookSpec,
@@ -51,7 +56,23 @@ export {
   removeHooks,
   splitCommand,
 } from "./hook-config.js";
-export { appendAt, JsonEditError, type JsonPath, parseJson, removeAt, setAt } from "./json-edit.js";
+export {
+  type FileState,
+  type InstallState,
+  loadState,
+  pruneFrom,
+  saveState,
+} from "./install-state.js";
+export {
+  appendAt,
+  JsonEditError,
+  type JsonPath,
+  missingContainers,
+  type PruneFn,
+  parseJson,
+  removeAt,
+  setAt,
+} from "./json-edit.js";
 export {
   type ApplyOptions,
   applyMigration,

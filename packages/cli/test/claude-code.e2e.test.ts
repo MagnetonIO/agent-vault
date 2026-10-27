@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { SecretMeta } from "@agent-vault/core";
 import { connect } from "@agent-vault/daemon";
 import { getPaths, ipcEndpoint } from "@agent-vault/platform";
@@ -127,8 +128,8 @@ describe("claude-code hook", { timeout: TIMEOUT_MS }, () => {
     expect(res).toMatchObject({ code: 0, stdout: "" });
   });
 
-  test("stdin that is not JSON, or empty, or over 8 MiB: exit 0, nothing on stdout", async () => {
-    for (const stdin of ["this is not json", "", "{", `${"a".repeat(9 * 1024 * 1024)}`]) {
+  test("stdin that is not JSON, or empty: exit 0, nothing on stdout", async () => {
+    for (const stdin of ["this is not json", "", "{"]) {
       const res = await hook("prompt-submit", stdin);
       expect(res, `stdin ${stdin.slice(0, 12)}`).toMatchObject({ code: 0, stdout: "" });
     }
@@ -139,6 +140,68 @@ describe("claude-code hook", { timeout: TIMEOUT_MS }, () => {
       env: sandboxEnv(sb),
     });
     expect(unknown).toMatchObject({ code: 0, stdout: "" });
+  });
+
+  test("a prompt over 8 MiB is blocked, key or not, because it cannot be checked", async () => {
+    const reason =
+      "Prompt over 8 MiB; agent-vault cannot check it. Paste keys separately with agent-vault grab.";
+    const before = (await secretsOf(sb)).length;
+    for (const filler of [`${PAT} ${"a".repeat(9 * 1024 * 1024)}`, "a".repeat(9 * 1024 * 1024)]) {
+      const res = await hook("prompt-submit", s3Input(sb, filler));
+      expect(res.code, res.stderr).toBe(0);
+      expect(JSON.parse(res.stdout)).toEqual({
+        decision: "block",
+        reason,
+        hookSpecificOutput: { hookEventName: "UserPromptSubmit", suppressOriginalPrompt: true },
+      });
+      expect(res.stdout + res.stderr).not.toContain(PAT);
+    }
+    // Garbage that is also over the cap is blocked on the same grounds.
+    const raw = await hook("prompt-submit", "b".repeat(9 * 1024 * 1024));
+    expect(JSON.parse(raw.stdout)).toMatchObject({ decision: "block", reason });
+    // A scrub event with a huge stdin does nothing.
+    const scrub = await hook("scrub", "c".repeat(9 * 1024 * 1024));
+    expect(scrub).toMatchObject({ code: 0, stdout: "" });
+    expect((await secretsOf(sb)).length).toBe(before);
+  });
+
+  test("a prompt without a key never loads the rest of the CLI", async () => {
+    // Log every module the process resolves; the fast path may touch detect, nothing more.
+    const log = path.join(sb.dir, "resolved.log");
+    const preload = put(
+      path.join(sb.dir, "trace.mjs"),
+      `import { appendFileSync } from "node:fs";
+import { registerHooks } from "node:module";
+registerHooks({
+  resolve(spec, ctx, next) {
+    const r = next(spec, ctx);
+    appendFileSync(process.env.AV_TRACE, r.url + "\\n");
+    return r;
+  },
+});
+`,
+    );
+    const env = sandboxEnv(sb, {
+      AV_TRACE: log,
+      NODE_OPTIONS: `--import ${pathToFileURL(preload).href}`,
+    });
+    const clean = await sb.cli(["hook", "claude-code", "prompt-submit"], {
+      stdin: s3Input(sb, "rename the function"),
+      env,
+    });
+    expect(clean).toMatchObject({ code: 0, stdout: "" });
+    const loaded = read(log);
+    expect(loaded).toContain("/detect/");
+    expect(loaded).not.toMatch(/program\.js|commander|\/adapters\/|\/daemon\//);
+
+    // With a key the rest is loaded.
+    fs.rmSync(log);
+    const keyed = await sb.cli(["hook", "claude-code", "prompt-submit"], {
+      stdin: s3Input(sb, `k ${fakes.slack()}`),
+      env,
+    });
+    expect(JSON.parse(keyed.stdout)).toMatchObject({ decision: "block" });
+    expect(read(log)).toMatch(/program\.js/);
   });
 
   test("--probe blocks a key without storing it", async () => {
@@ -161,7 +224,7 @@ describe("claude-code hook, vault unavailable", { timeout: TIMEOUT_MS }, () => {
     expect(res.code, res.stderr).toBe(0);
     expect(JSON.parse(res.stdout)).toEqual({
       decision: "block",
-      reason: "Key held back from the model. Run: agent-vault init, then paste again.",
+      reason: "Key held back from the model. Run: agent-vault doctor claude-code",
       hookSpecificOutput: { hookEventName: "UserPromptSubmit", suppressOriginalPrompt: true },
     });
     expect(res.stdout + res.stderr).not.toContain(PAT);

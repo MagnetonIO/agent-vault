@@ -3,7 +3,7 @@ import { AdapterError } from "@agent-vault/adapters";
 import type { Command } from "commander";
 import { CliError } from "../errors.js";
 import { adapterFor } from "../harness.js";
-import { say } from "../output.js";
+import { say, warn } from "../output.js";
 
 export function installCommand(program: Command): void {
   program
@@ -22,6 +22,7 @@ export function installCommand(program: Command): void {
           if (err instanceof AdapterError) throw new CliError(err.message);
           throw err;
         });
+      for (const w of report.warnings ?? []) warn(`WARNING: ${w}`);
       for (const note of report.notes) say(note);
       for (const file of report.backups) say(`backed up to ${file}`);
       say(`installed for ${harness}. Check it with: agent-vault doctor ${harness}`);
