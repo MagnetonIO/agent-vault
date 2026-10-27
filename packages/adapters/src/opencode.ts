@@ -28,6 +28,8 @@ export type OpenCodeDeps = {
   command: string[];
   /** Connects to the daemon. */
   client: () => Promise<HookClient>;
+  /** For one-line notices on stderr (uninstall leaving an entry alone). */
+  log?: ((message: string) => void) | undefined;
   /** Default `process.env`; only `XDG_CONFIG_HOME` is read from it. */
   env?: NodeJS.ProcessEnv | undefined;
   /** Default `getPaths().backupsDir`. */
@@ -44,6 +46,7 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
  */
 export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
   const env = deps.env ?? process.env;
+  const log = deps.log ?? (() => {});
   const backupsDir = (): string => deps.backupsDir ?? getPaths().backupsDir;
 
   /** `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode` (on every OS, as OpenCode does). */
@@ -64,6 +67,25 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
     command: [...deps.command, "mcp"],
     enabled: true,
   });
+  /**
+   * True if agent-vault could have written `e`: a local server whose command ends in `mcp` and
+   * starts with an absolute path or the bare name. Anything else under our name is the user's.
+   */
+  const isOurs = (e: Record<string, unknown>): boolean => {
+    const cmd = e.command;
+    if (e.type !== "local" || !Array.isArray(cmd) || cmd.length < 2) return false;
+    const first = cmd[0];
+    return (
+      cmd[cmd.length - 1] === "mcp" &&
+      typeof first === "string" &&
+      (path.isAbsolute(first) || first === "agent-vault")
+    );
+  };
+  const foreignBase = (file: string): string =>
+    `${path.basename(file)} already has an "${MCP_NAME}" MCP entry that agent-vault did not write`;
+  const foreign = (file: string): string =>
+    `${foreignBase(file)}; remove or rename it, then run install again`;
+
   const sameEntry = (e: Record<string, unknown>): boolean => {
     const want = entry();
     return (
@@ -131,6 +153,9 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
       }));
 
       const report: InstallReport = { harness: "opencode", files: [], backups: [], notes: [] };
+      for (const f of found) {
+        if (f.entry && !isOurs(f.entry)) throw new AdapterError(foreign(f.file));
+      }
       const current = found.find((f) => f.entry !== null);
       if (current?.entry && sameEntry(current.entry)) {
         report.notes.push(`MCP server agent-vault was already registered in ${current.file}`);
@@ -158,7 +183,12 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
     async uninstall(home) {
       for (const file of existing(home)) {
         const text = read(file);
-        if (entryOf(file, parsed(file, text)) === null) continue;
+        const mine = entryOf(file, parsed(file, text));
+        if (mine === null) continue;
+        if (!isOurs(mine)) {
+          log(`${foreignBase(file)}; left it alone`);
+          continue;
+        }
         const next = removeAt(text, ["mcp", MCP_NAME]);
         backupFile(file, backupsDir());
         // A file install made holds nothing but what install put there.
@@ -183,13 +213,10 @@ export function createOpenCodeAdapter(deps: OpenCodeDeps): HarnessAdapter {
         const e = hit?.entry;
         if (!hit || !e) {
           add("mcp", false, "agent-vault is not registered", reinstall);
-        } else if (e.type !== "local" || e.enabled === false) {
-          add(
-            "mcp",
-            false,
-            `the entry in ${hit.file} is disabled or not a local server`,
-            reinstall,
-          );
+        } else if (!isOurs(e)) {
+          add("mcp", false, foreign(hit.file), `rename the entry, then ${reinstall}`);
+        } else if (e.enabled === false) {
+          add("mcp", false, `the entry in ${hit.file} is disabled`, reinstall);
         } else {
           const words = Array.isArray(e.command) ? e.command.map(String) : [];
           const gone = words.filter((w) => path.isAbsolute(w) && !fs.existsSync(w));

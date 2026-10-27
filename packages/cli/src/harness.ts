@@ -38,6 +38,7 @@ export function adapterFor(id: string): HarnessAdapter {
       return createOpenCodeAdapter({
         command: selfCommand(),
         client: () => daemonClient(undefined, { interactive: false }),
+        log: warn,
       });
     default:
       throw new CliError(`unknown harness "${id}"; one of: ${HARNESS_IDS.join(", ")}`);

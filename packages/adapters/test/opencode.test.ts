@@ -36,6 +36,7 @@ const DB_LINE =
 function make(
   extra: { env?: NodeJS.ProcessEnv; client?: () => Promise<HookClient>; command?: string[] } = {},
 ) {
+  const logs: string[] = [];
   const main = write(path.join(box.dir, "bin", "main.js"), "// stands in for the CLI\n");
   const command = extra.command ?? [process.execPath, main];
   const adapter = createOpenCodeAdapter({
@@ -43,8 +44,9 @@ function make(
     env: extra.env ?? {},
     backupsDir: box.paths.backupsDir,
     client: extra.client ?? (async () => connect(ipcEndpoint(box.paths))),
+    log: (m) => logs.push(m),
   });
-  return { adapter, command };
+  return { adapter, command, logs };
 }
 
 const entryOf = (command: string[]) => ({
@@ -63,6 +65,88 @@ const COMMENTED = `{
   },
 }
 `;
+
+/** Entries under our name that agent-vault did not write. */
+const FOREIGN: [string, unknown][] = [
+  ["a remote server", { type: "remote", url: "https://my.example/mcp" }],
+  ["a local server with another command", { type: "local", command: ["npx", "my-server"] }],
+  ["a local command that does not end in mcp", { type: "local", command: ["/usr/bin/x", "serve"] }],
+  ["a relative command", { type: "local", command: ["./bin/x", "mcp"], enabled: true }],
+];
+const foreignFile = (entry: unknown) =>
+  `{\n  // mine\n  "mcp": {\n    "agent-vault": ${JSON.stringify(entry)}\n  }\n}\n`;
+
+describe("an agent-vault entry that is not ours", () => {
+  for (const [label, entry] of FOREIGN) {
+    test(`install refuses ${label} and writes nothing`, async () => {
+      const { adapter } = make();
+      const text = foreignFile(entry);
+      write(jsonFile(), text);
+      await expect(adapter.install({ home: box.home })).rejects.toThrow(
+        'opencode.json already has an "agent-vault" MCP entry that agent-vault did not write; remove or rename it, then run install again',
+      );
+      expect(read(jsonFile())).toBe(text);
+      expect(backups()).toEqual([]);
+    });
+
+    test(`uninstall leaves ${label} alone, says so, and does not throw`, async () => {
+      const { adapter, logs } = make();
+      const text = foreignFile(entry);
+      write(jsonFile(), text);
+      await adapter.uninstall(box.home);
+      expect(read(jsonFile())).toBe(text);
+      expect(backups()).toEqual([]);
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toContain("did not write");
+    });
+
+    test(`doctor reports ${label} as red`, async () => {
+      const { adapter } = make();
+      write(jsonFile(), foreignFile(entry));
+      const report = await adapter.doctor(box.home);
+      const mcp = report.checks.find((c) => c.name === "mcp");
+      expect(mcp).toMatchObject({ ok: false });
+      expect(mcp?.detail).toContain("did not write; remove or rename it");
+      expect(report.ok).toBe(false);
+    });
+  }
+
+  test("a foreign entry in opencode.jsonc is caught too", async () => {
+    const { adapter } = make();
+    write(jsonFile(), "{}\n");
+    write(jsoncFile(), foreignFile(FOREIGN[0]?.[1]));
+    await expect(adapter.install({ home: box.home })).rejects.toThrow(
+      /opencode\.jsonc already has/,
+    );
+    expect(read(jsonFile())).toBe("{}\n");
+  });
+
+  test("our own entry from another install location is replaced in place", async () => {
+    const { adapter, command } = make();
+    write(
+      jsonFile(),
+      `{\n  "mcp": {\n    "agent-vault": { "type": "local", "command": ["/old/place/agent-vault", "mcp"], "enabled": true }\n  }\n}\n`,
+    );
+    await adapter.install({ home: box.home });
+    const root = parseJsonc(read(jsonFile())) as { mcp: Record<string, unknown> };
+    expect(root.mcp["agent-vault"]).toEqual(entryOf(command));
+    await adapter.uninstall(box.home);
+    expect(parseJsonc(read(jsonFile()))).toEqual({});
+  });
+
+  test("the bare name agent-vault counts as ours", async () => {
+    const { adapter, command } = make();
+    write(
+      jsonFile(),
+      JSON.stringify({
+        mcp: { "agent-vault": { type: "local", command: ["agent-vault", "mcp"] } },
+      }),
+    );
+    await adapter.install({ home: box.home });
+    const root = parseJsonc(read(jsonFile())) as { mcp: Record<string, unknown> };
+    expect(root.mcp["agent-vault"]).toEqual(entryOf(command));
+  });
+});
 
 describe("install", () => {
   test("keeps comments and formatting and adds the MCP entry", async () => {
