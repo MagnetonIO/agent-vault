@@ -41,16 +41,20 @@ export function readHookInput(stream: Source): Promise<HookInput> {
 /**
  * True when argv is `hook <harness> prompt-submit` and the prompt holds no key, so the answer is
  * "allow" (print nothing, exit 0). False in every other case, including any doubt: the full
- * command then decides. Never throws.
+ * command then decides, and blocks a prompt whose detection throws. Never throws.
  */
-export async function fastAllow(argv: string[], stdin: Source): Promise<boolean> {
+export async function fastAllow(
+  argv: string[],
+  stdin: Source,
+  detect: (text: string) => unknown[] = detectSecrets,
+): Promise<boolean> {
   try {
     if (argv[2] !== "hook" || argv[4] !== "prompt-submit" || stdin.isTTY) return false;
     const input = await readHookInput(stdin);
     if (input.oversize) return false;
     const parsed: unknown = JSON.parse(input.raw);
     const prompt = (parsed as { prompt?: unknown } | null)?.prompt;
-    return typeof prompt === "string" && detectSecrets(prompt).length === 0;
+    return typeof prompt === "string" && detect(prompt).length === 0;
   } catch {
     return false;
   }

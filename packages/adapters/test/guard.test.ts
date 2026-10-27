@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -53,6 +54,17 @@ describe("scanDiff", () => {
       `-${PAT}`,
     ].join("\n");
     expect(scanDiff(diff).map((h) => [h.file, h.line])).toEqual([["a.txt", 2]]);
+  });
+
+  test("an added line with a 9 MiB base64 run is checked, and the key beside it is reported", () => {
+    const blob = randomBytes(7 * 1024 * 1024).toString("base64");
+    const hits = scanDiff(
+      `diff --git a/big.txt b/big.txt\n+++ b/big.txt\n@@ -0,0 +1 @@\n+${PAT} ${blob}`,
+    );
+    expect(hits.map((h) => h.fingerprint.split(" ")[0])).toEqual([
+      "github",
+      "generic-high-entropy",
+    ]);
   });
 
   test("a vault:// reference is ignored even where it looks like a key", () => {

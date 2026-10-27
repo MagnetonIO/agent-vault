@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -235,6 +236,27 @@ describe("claude-code hook, vault unavailable", { timeout: TIMEOUT_MS }, () => {
       env: sandboxEnv(sb, { AGENT_VAULT_KEYFILE_PASSPHRASE: "" }),
     });
     expect(clean).toMatchObject({ code: 0, stdout: "" });
+  });
+});
+
+describe("claude-code hook, a key next to a multi-MiB blob", { timeout: TIMEOUT_MS }, () => {
+  test("an sk-ant key plus a 5.6 MB base64 run blocks (the detector used to throw and allow)", async () => {
+    const sb = sandbox(); // never initialised: the decision comes from detection alone
+    const KEY = fakes.anthropic();
+    const blob = randomBytes(4_200_000).toString("base64"); // one 5.6 MB run, over 5.33 MiB
+    expect(blob.length).toBeGreaterThan(5.34 * 1024 * 1024);
+    for (const prompt of [`${KEY} ${blob}`, `${blob} ${KEY}`]) {
+      const res = await sb.cli(["hook", "claude-code", "prompt-submit"], {
+        stdin: s3Input(sb, prompt),
+        env: sandboxEnv(sb, { AGENT_VAULT_KEYFILE_PASSPHRASE: "" }),
+      });
+      expect(res.code, res.stderr).toBe(0);
+      expect(JSON.parse(res.stdout)).toMatchObject({
+        decision: "block",
+        hookSpecificOutput: { suppressOriginalPrompt: true },
+      });
+      expect(res.stdout + res.stderr).not.toContain(KEY);
+    }
   });
 });
 

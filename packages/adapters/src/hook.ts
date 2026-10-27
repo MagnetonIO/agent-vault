@@ -28,6 +28,10 @@ export const heldBackReason = (harness: HarnessId): string =>
 export const OVERSIZE_REASON =
   "Prompt over 8 MiB; agent-vault cannot check it. Paste keys separately with agent-vault grab.";
 
+/** Detection itself failed. Nothing is known about the prompt, so it is not sent either. */
+export const DETECT_FAILED_REASON =
+  "agent-vault could not check this prompt; paste keys with agent-vault grab";
+
 /**
  * Connecting, storing and queueing must all finish within this, or the key is held back. It sits
  * under the 30 s timeout of the installed hook: past that the harness treats the hook as failed
@@ -65,6 +69,8 @@ export type PromptSubmitOptions = {
   log?: ((message: string) => void) | undefined;
   /** Default `HOOK_DEADLINE_MS`. */
   deadlineMs?: number | undefined;
+  /** Default `detectSecrets`; tests inject one that throws. */
+  detect?: ((text: string) => Detection[]) | undefined;
 };
 
 const ALLOW: PromptDecision = { block: false };
@@ -106,17 +112,17 @@ async function queueScrub(
 /**
  * Decide what to do with a prompt. Detection runs here, so a prompt without a key never touches
  * the daemon. With a key: store each distinct value (`secret.put`, tagged `exposed-locally`),
- * queue the transcript and history for scrubbing, and block. Any failure after detection still
+ * queue the transcript and history for scrubbing, and block. Any failure, detection included,
  * blocks: the key must not reach the model.
  */
 export async function handlePromptSubmit(opts: PromptSubmitOptions): Promise<PromptDecision> {
   const log = opts.log ?? (() => {});
   let detections: Detection[];
   try {
-    detections = detectSecrets(opts.prompt);
+    detections = (opts.detect ?? detectSecrets)(opts.prompt);
   } catch (err) {
-    log(`agent-vault: detection failed, prompt allowed: ${message(err)}`);
-    return ALLOW;
+    log(`agent-vault: detection failed, prompt blocked: ${message(err)}`);
+    return { block: true, reason: DETECT_FAILED_REASON, names: [] };
   }
   if (detections.length === 0) return ALLOW;
 

@@ -12,6 +12,7 @@ import {
   CLAUDE_HOOK_MARKER,
   type ClaudeRunner,
   createClaudeCodeAdapter,
+  DETECT_FAILED_REASON,
   EXPOSED_TAG,
   findHooks,
   type HookClient,
@@ -188,6 +189,28 @@ describe("prompt-submit hook", () => {
     });
     expect(decision).toMatchObject({ block: true, reason: heldBackReason("claude-code") });
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  test("a detector that throws blocks the prompt (fail closed) and never contacts the daemon", async () => {
+    const client = vi.fn<() => Promise<HookClient>>();
+    const logs: string[] = [];
+    const decision = await handlePromptSubmit({
+      harness: "claude-code",
+      prompt: `k ${PAT}`,
+      historyFiles: [],
+      client,
+      log: (m) => logs.push(m),
+      detect: () => {
+        throw new RangeError("Maximum call stack size exceeded");
+      },
+    });
+    expect(decision).toEqual({ block: true, reason: DETECT_FAILED_REASON, names: [] });
+    expect(DETECT_FAILED_REASON).toBe(
+      "agent-vault could not check this prompt; paste keys with agent-vault grab",
+    );
+    expect(client).not.toHaveBeenCalled();
+    expect(logs.join("\n")).toContain("prompt blocked");
+    expect(logs.join("\n")).not.toContain(PAT);
   });
 
   test("the same key pasted twice is stored once", async () => {

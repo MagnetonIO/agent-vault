@@ -38,6 +38,7 @@ export {
   uninstallHook,
 } from "./guard.js";
 export {
+  DETECT_FAILED_REASON,
   EXPOSED_TAG,
   HOOK_DEADLINE_MS,
   type HookClient,

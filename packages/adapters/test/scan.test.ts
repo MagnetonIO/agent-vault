@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -71,6 +72,16 @@ describe("scanHistory", () => {
     const out = JSON.stringify(hits);
     expect(out).not.toContain(PAT);
     expect(out).not.toContain(OPENAI);
+  });
+
+  test("a line with a 9 MiB base64 run is scanned, not skipped, and the key beside it is found", async () => {
+    const KEY = fakes.anthropic();
+    const blob = randomBytes(7 * 1024 * 1024).toString("base64"); // one run of about 9.3 MiB
+    const file = put("big.jsonl", `${JSON.stringify({ text: `${KEY} ${blob}` })}\n`);
+    const warnings: string[] = [];
+    const hits = await scanHistory([file], { warn: (m) => warnings.push(m) });
+    expect(warnings).toEqual([]);
+    expect(hits[0]?.fingerprints.some((fp) => fp.startsWith("anthropic "))).toBe(true);
   });
 
   test("a secret inside a JSON-escaped multi-line string is found", async () => {

@@ -43,6 +43,14 @@ describe("fastAllow", () => {
     expect(read).not.toHaveBeenCalled();
   });
 
+  test("a detector that throws defers to the full command (which blocks), never allows", async () => {
+    const text = JSON.stringify({ prompt: "rename it" });
+    const throwing = () => {
+      throw new RangeError("Maximum call stack size exceeded");
+    };
+    expect(await mod.fastAllow(argv(), stdin(text), throwing)).toBe(false);
+  });
+
   test("a terminal is never read", async () => {
     const source = Object.assign(stdin("x"), { isTTY: true });
     expect(await mod.fastAllow(argv(), source)).toBe(false);

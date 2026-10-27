@@ -32,10 +32,10 @@ const utcStamp = (d: Date): string =>
 function collect(text: string): Candidate[] {
   const out: Candidate[] = [];
   for (const rule of RULES) {
-    for (const m of text.matchAll(rule.pattern)) {
+    for (const m of rule.scan(text)) {
       const refined = rule.refine
-        ? rule.refine(m[0], text.slice(Math.max(0, m.index - BEFORE_CONTEXT), m.index))
-        : { offset: 0, value: m[0] };
+        ? rule.refine(m.text, text.slice(Math.max(0, m.index - BEFORE_CONTEXT), m.index))
+        : { offset: 0, value: m.text };
       if (!refined) continue;
       const start = m.index + refined.offset;
       out.push({

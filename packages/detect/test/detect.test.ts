@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { createRedactor, type Detection, detectSecrets, fingerprint } from "../src/index.js";
-import { B64, benign, body, fakes } from "./fixtures/fake-keys.js";
+import { ALNUM, B64, benign, body, fakes } from "./fixtures/fake-keys.js";
 
 const NOW = new Date(Date.UTC(2026, 9, 27, 23, 59, 0));
 
@@ -291,6 +291,71 @@ describe("performance", () => {
     expect(ms).toBeLessThan(1000);
     // names stay unique without rescanning
     expect(new Set(found.map((d) => d.suggestedName)).size).toBe(found.length);
+  });
+});
+
+describe("single runs of several MiB (V8 throws RangeError on a regex repeat that long)", () => {
+  const MiB = 1024 * 1024;
+  const BLOCK = 64 * 1024;
+  /** `size` chars from `alphabet`: one random 64 KiB block repeated, so building it is fast. */
+  const run = (alphabet: string, size: number, seed: number): string =>
+    body(alphabet, BLOCK, seed)
+      .repeat(Math.ceil(size / BLOCK))
+      .slice(0, size);
+  const URLSAFE = `${ALNUM}_-`;
+  // Prefixes are assembled at runtime, like the fakes, so no key-shaped literal is in the repo.
+  const cases: [rule: string, build: (size: number) => string][] = [
+    ["generic-high-entropy", (n) => run(B64, n, 1)],
+    ["anthropic", (n) => `sk-${"ant"}-${run(URLSAFE, n, 2)}`],
+    ["openai", (n) => `sk-${run(URLSAFE, n, 3)}`],
+    ["github", (n) => `github${"_pat"}_${run(`${ALNUM}_`, n, 4)}`],
+    ["slack", (n) => `xo${"xb"}-${run(`${ALNUM}-`, n, 5)}`],
+    ["apify", (n) => `apify${"_api"}_${run(ALNUM, n, 6)}`],
+    ["jwt", (n) => `eyJ${run(URLSAFE, n, 7)}.eyJ${body(URLSAFE, 40, 8)}.${body(URLSAFE, 40, 9)}`],
+    ["pem", (n) => `-----BEGIN ${"RSA "}PRIVATE KEY-----\n${run(B64, n, 10)}`],
+  ];
+
+  test.each(cases)("%s: a 9 MiB run is one detection, spanning the whole run", (rule, build) => {
+    // Line breaks around it: a PEM body line only counts when a line break ends it.
+    const text = `before\n${build(9 * MiB)}\n(after)`;
+    const found = detectSecrets(text, { now: NOW });
+    expect(found.map((d) => d.ruleId)).toEqual([rule]);
+    const [d] = found as [Detection];
+    expect(d.start).toBe("before\n".length);
+    expect(d.end).toBe(text.length - "\n(after)".length);
+  });
+
+  test.each(cases)("%s: an 8 MiB run scans in under 2 s", (_rule, build) => {
+    const text = build(8 * MiB);
+    const t0 = performance.now();
+    detectSecrets(text, { now: NOW });
+    expect(performance.now() - t0).toBeLessThan(2000);
+  });
+
+  test("a key next to a 9 MiB blob is still found", () => {
+    const key = fakes.anthropic();
+    const found = detectSecrets(`${key} ${run(B64, 9 * MiB, 11)}`, { now: NOW });
+    expect(found.map((d) => d.value)).toContain(key);
+  });
+
+  test("runs that never match (padding, letters, a header with no end) stay fast", () => {
+    for (const text of [
+      `${"=".repeat(9 * MiB)}A`,
+      `${"a".repeat(9 * MiB)}1`,
+      `${"A".repeat(9 * MiB)}1`,
+      `-----BEGIN ${"A".repeat(9 * MiB)}`,
+      "-eyJ".repeat((9 * MiB) / 4),
+    ]) {
+      const t0 = performance.now();
+      expect(detectSecrets(text, { now: NOW })).toEqual([]);
+      expect(performance.now() - t0).toBeLessThan(2000);
+    }
+  });
+
+  test("an ENV_NAME longer than any real one still splits off the value", () => {
+    const value = body(B64, 40, 12);
+    const found = detectSecrets(`API${"_X".repeat(100_000)}=${value}`, { now: NOW });
+    expect(found.map((d) => d.value)).toEqual([value]);
   });
 });
 
