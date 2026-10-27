@@ -393,7 +393,12 @@ describe("recovery", () => {
     const err = await recoverVault({ paths, store: new MemoryKeyStore(), words }).catch(
       (e: unknown) => e,
     );
-    expect((err as Error).message).not.toContain(words[0] ?? "");
+    // Not a single word: BIP39 has "valid" and "vault", which the message itself contains.
+    const message = (err as Error).message;
+    expect(message).not.toContain(words.join(" "));
+    for (let i = 0; i + 3 <= words.length; i++) {
+      expect(message).not.toContain(words.slice(i, i + 3).join(" "));
+    }
   });
 });
 

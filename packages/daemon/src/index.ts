@@ -5,6 +5,8 @@ export {
   DaemonAlreadyRunningError,
   DaemonExitedError,
   DaemonIdentityError,
+  RecoveryInProgressError,
   RpcError,
 } from "./errors.js";
+export { acquireRecoverLock, recoverLockPath, recoveryInProgress } from "./lock.js";
 export { type DaemonHandle, type StartDaemonOptions, startDaemon } from "./server.js";

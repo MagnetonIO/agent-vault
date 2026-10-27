@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ensurePrivateDir } from "@agent-vault/platform";
-import { DaemonAlreadyRunningError } from "./errors.js";
+import { DaemonAlreadyRunningError, RecoveryInProgressError } from "./errors.js";
 
 /** An empty or unparseable lock this old is a crashed starter's, not one mid-write. */
 const STALE_UNPARSEABLE_MS = 5000;
@@ -151,6 +151,25 @@ function reapStale(file: string, platform: NodeJS.Platform): boolean {
   return true;
 }
 
+function acquireAt(
+  runtimeDir: string,
+  file: string,
+  platform: NodeJS.Platform,
+  busy: () => Error,
+): () => void {
+  ensurePrivateDir(runtimeDir);
+  const written =
+    tryCreate(file, platform) ?? (reapStale(file, platform) ? tryCreate(file, platform) : null);
+  if (written === null) throw busy();
+  return () => {
+    try {
+      if (fs.readFileSync(file, "utf8") === written) fs.rmSync(file, { force: true });
+    } catch {
+      // already gone
+    }
+  };
+}
+
 /**
  * Take the single-instance lock `<runtimeDir>/vaultd.lock`, which holds `{ pid, bootId, uptimeMs, startedAt }`.
  * Synchronous, so concurrent starters (even in one process) are strictly ordered.
@@ -164,16 +183,34 @@ export function acquireLock(
   runtimeDir: string,
   platform: NodeJS.Platform = process.platform,
 ): () => void {
-  ensurePrivateDir(runtimeDir);
   const file = lockPath(runtimeDir);
-  const written =
-    tryCreate(file, platform) ?? (reapStale(file, platform) ? tryCreate(file, platform) : null);
-  if (written === null) throw new DaemonAlreadyRunningError(file);
-  return () => {
-    try {
-      if (fs.readFileSync(file, "utf8") === written) fs.rmSync(file, { force: true });
-    } catch {
-      // already gone
-    }
-  };
+  return acquireAt(runtimeDir, file, platform, () => new DaemonAlreadyRunningError(file));
+}
+
+export const recoverLockPath = (runtimeDir: string): string =>
+  path.join(runtimeDir, "recover.lock");
+
+/**
+ * Claim `<runtimeDir>/recover.lock` for `agent-vault recover`, which must own the only daemon while
+ * it replaces the root key. Same format and stale rules as vaultd.lock. Throws
+ * RecoveryInProgressError while another live recover holds it.
+ */
+export function acquireRecoverLock(
+  runtimeDir: string,
+  platform: NodeJS.Platform = process.platform,
+): () => void {
+  return acquireAt(
+    runtimeDir,
+    recoverLockPath(runtimeDir),
+    platform,
+    () => new RecoveryInProgressError(),
+  );
+}
+
+/** Is a recover running? A lock whose owner is gone is reaped and does not count. */
+export function recoveryInProgress(
+  runtimeDir: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return !reapStale(recoverLockPath(runtimeDir), platform);
 }

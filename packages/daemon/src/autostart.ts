@@ -28,12 +28,16 @@ export type EnsureDaemonOptions = {
    * user can read it. Setting it adds `--passphrase-stdin` to the default argv.
    */
   stdinPayload?: Uint8Array | undefined;
+  /** Appended to the default argv (`--recovering`). Ignored with an explicit `spawnArgv`. */
+  extraArgs?: string[] | undefined;
+  /** Called with the pid of the daemon this call spawned, if it spawned one. */
+  onSpawn?: ((pid: number | undefined) => void) | undefined;
   /** The spawned daemon's environment. Default: this process's. */
   env?: NodeJS.ProcessEnv | undefined;
 };
 
 /** The CLI that is running now, asked to run the daemon (Task 14 provides `daemon run`). */
-function defaultArgv(withStdinPassphrase: boolean): string[] {
+function defaultArgv(withStdinPassphrase: boolean, extraArgs: string[]): string[] {
   const entry = process.argv[1];
   if (!entry) throw new Error("cannot tell which CLI to spawn: process.argv[1] is empty");
   return [
@@ -42,6 +46,7 @@ function defaultArgv(withStdinPassphrase: boolean): string[] {
     "daemon",
     "run",
     ...(withStdinPassphrase ? ["--passphrase-stdin"] : []),
+    ...extraArgs,
   ];
 }
 
@@ -61,7 +66,7 @@ export async function ensureDaemon(
   }
 
   const payload = opts.stdinPayload;
-  const [cmd, ...args] = opts.spawnArgv ?? defaultArgv(payload !== undefined);
+  const [cmd, ...args] = opts.spawnArgv ?? defaultArgv(payload !== undefined, opts.extraArgs ?? []);
   if (!cmd) throw new Error("spawnArgv is empty");
   const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   const child = spawn(cmd, args, {
@@ -70,6 +75,7 @@ export async function ensureDaemon(
     windowsHide: true,
     ...(opts.env !== undefined && { env: opts.env }),
   });
+  opts.onSpawn?.(child.pid);
   if (payload) {
     const line = Buffer.concat([payload, Buffer.from("\n")]);
     child.stdin?.on("error", () => {}); // EPIPE if the daemon is already gone

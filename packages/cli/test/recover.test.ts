@@ -1,10 +1,13 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { acquireRecoverLock } from "@agent-vault/daemon";
 import { getPaths } from "@agent-vault/platform";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { recover } from "../src/commands/recover.js";
 import { stopDaemon } from "../src/daemon-control.js";
-import { CLI, makeSandbox, PASSPHRASE, type Sandbox } from "./harness.js";
+import { CliError } from "../src/errors.js";
+import { CLI, makeSandbox, PASSPHRASE, type RunningCli, type Sandbox } from "./harness.js";
 
 const TIMEOUT_MS = 60_000;
 const NEW_PASSPHRASE = "a brand new passphrase 4410";
@@ -14,7 +17,7 @@ describe("recover with a keyfile store", { timeout: TIMEOUT_MS }, () => {
   let sb: Sandbox;
   let saved: NodeJS.ProcessEnv;
   let words: string[];
-  const spawnArgv = [process.execPath, CLI, "daemon", "run", "--passphrase-stdin"];
+  const spawnArgv = [process.execPath, CLI, "daemon", "run", "--passphrase-stdin", "--recovering"];
   const paths = () => getPaths({ AGENT_VAULT_HOME: sb.home });
   const backups = () => fs.readdirSync(sb.home).filter((f) => f.startsWith("keyfile.bak"));
 
@@ -92,4 +95,98 @@ describe("recover with a keyfile store", { timeout: TIMEOUT_MS }, () => {
     expect(fs.readFileSync(path.join(sb.home, "keyfile"), "utf8")).toBe(before);
     expect(await sb.daemonPid()).not.toBeNull(); // still running: nothing was stopped
   });
+
+  const typed = (over: Partial<Parameters<typeof recover>[1]> = {}) => ({
+    words: async () => words,
+    passphrase: async () => NEW_PASSPHRASE,
+    ...over,
+  });
+
+  /** Nothing of the failed attempt is left, and the old passphrase opens the old keyfile. */
+  async function expectRolledBack(keyfileBefore: string) {
+    expect(fs.readFileSync(path.join(sb.home, "keyfile"), "utf8")).toBe(keyfileBefore);
+    expect(backups()).toEqual([]);
+    expect(fs.existsSync(path.join(paths().runtimeDir, "recover.lock"))).toBe(false);
+    expect(await sb.daemonPid()).toBeNull();
+    const list = await sb.cli(["list"]);
+    expect(list.code, list.stderr).toBe(0);
+    expect(list.stdout).toContain("kept/secret");
+  }
+
+  test("while recover runs, no other command can start a daemon", async () => {
+    await sb.stopDaemon();
+    const release = acquireRecoverLock(paths().runtimeDir);
+    try {
+      const list = await sb.cli(["list"]);
+      expect(list.code).toBe(1);
+      expect(list.stderr).toContain("vault recovery in progress");
+      const direct = await sb.cli(["daemon", "run"]);
+      expect(direct.code).toBe(1);
+      expect(direct.stderr).toContain("vault recovery in progress");
+      // A second recover is refused too.
+      await expect(recover(paths(), typed(), { spawnArgv })).rejects.toThrow(
+        "vault recovery in progress",
+      );
+      expect(await sb.daemonPid()).toBeNull();
+    } finally {
+      release();
+    }
+    expect((await sb.cli(["list"])).code).toBe(0);
+  });
+
+  test("a recover.lock left by a dead process is reaped, not obeyed", async () => {
+    await sb.stopDaemon();
+    const dead = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], {
+      encoding: "utf8",
+    });
+    fs.mkdirSync(paths().runtimeDir, { recursive: true });
+    const lock = path.join(paths().runtimeDir, "recover.lock");
+    fs.writeFileSync(
+      lock,
+      JSON.stringify({ pid: Number(dead.stdout), bootId: "", startedAt: new Date().toISOString() }),
+    );
+    const list = await sb.cli(["list"]);
+    expect(list.code, list.stderr).toBe(0);
+    expect(fs.existsSync(lock)).toBe(false);
+  });
+
+  test("a daemon that is not the one recover spawned makes it fail and roll back", async () => {
+    const before = fs.readFileSync(path.join(sb.home, "keyfile"), "utf8");
+    let rival: RunningCli | undefined;
+    await expect(
+      recover(paths(), typed(), {
+        spawnArgv,
+        // A daemon some hook started on the old passphrase, between the rename and our start.
+        after: async (step) => {
+          if (step !== "renamed") return;
+          rival = sb.start(["daemon", "run", "--recovering"]);
+          for (let i = 0; i < 200 && (await sb.daemonPid()) === null; i++) {
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          expect(await sb.daemonPid()).not.toBeNull();
+        },
+      }),
+    ).rejects.toThrow("another vaultd answered instead of the one recover started");
+    await rival?.done;
+    await expectRolledBack(before);
+  });
+
+  test.each(["renamed", "started"] as const)(
+    "SIGINT after the %s step rolls back and exits 130",
+    async (step) => {
+      const before = fs.readFileSync(path.join(sb.home, "keyfile"), "utf8");
+      const err = await recover(paths(), typed(), {
+        spawnArgv,
+        after: (at) => {
+          if (at === step) process.emit("SIGINT");
+        },
+      }).then(
+        () => null,
+        (e: unknown) => e as CliError,
+      );
+      expect(err).toBeInstanceOf(CliError);
+      expect(err?.exitCode).toBe(130);
+      await expectRolledBack(before);
+    },
+  );
 });

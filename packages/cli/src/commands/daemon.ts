@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { DaemonAlreadyRunningError, startDaemon } from "@agent-vault/daemon";
+import { DaemonAlreadyRunningError, recoveryInProgress, startDaemon } from "@agent-vault/daemon";
 import {
   getPaths,
   openKeyfileStore,
@@ -16,7 +16,7 @@ import {
   readConfig,
   WRONG_PASSPHRASE_MESSAGE,
 } from "../config.js";
-import { LOCKED_MESSAGE } from "../context.js";
+import { LOCKED_MESSAGE, RECOVERY_IN_PROGRESS } from "../context.js";
 import { stopDaemon } from "../daemon-control.js";
 import { CliError, exitWith } from "../errors.js";
 import { isTty, promptPassphrase } from "../tty.js";
@@ -79,8 +79,13 @@ async function openConfiguredStore(paths: VaultPaths, fromStdin: boolean): Promi
   return openKeyfileStore(keyfilePath(paths), passphrase);
 }
 
-async function runDaemon(opts: { passphraseStdin?: boolean }): Promise<void> {
+async function runDaemon(opts: { passphraseStdin?: boolean; recovering?: boolean }): Promise<void> {
   const paths = getPaths();
+  // `recover` owns the only daemon while it replaces the root key; it starts its own with
+  // --recovering.
+  if (!opts.recovering && recoveryInProgress(paths.runtimeDir)) {
+    throw new CliError(RECOVERY_IN_PROGRESS);
+  }
   const store = await openConfiguredStore(paths, opts.passphraseStdin === true);
   let handle: Awaited<ReturnType<typeof startDaemon>>;
   try {
@@ -115,6 +120,7 @@ export function daemonCommand(program: Command): void {
         "read the keyfile passphrase as one line on stdin",
       ).hideHelp(),
     )
+    .addOption(new Option("--recovering", "started by `agent-vault recover`").hideHelp())
     .action(runDaemon);
   daemon
     .command("stop")

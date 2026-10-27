@@ -5,6 +5,7 @@ import {
   ensureDaemon,
   type IpcClient,
   RpcError,
+  recoveryInProgress,
 } from "@agent-vault/daemon";
 import { getPaths, ipcEndpoint, type VaultPaths } from "@agent-vault/platform";
 import {
@@ -24,7 +25,13 @@ export type DaemonOptions = {
   passphrase?: string | undefined;
   /** What to spawn instead of this CLI's `daemon run --passphrase-stdin` (tests). */
   spawnArgv?: string[] | undefined;
+  /** This is `recover`, which owns the recovery lock: start a daemon despite it (`--recovering`). */
+  recovering?: boolean | undefined;
+  /** Told the pid of the daemon this call spawned, if it spawned one. */
+  onSpawn?: ((pid: number | undefined) => void) | undefined;
 };
+
+export const RECOVERY_IN_PROGRESS = "vault recovery in progress";
 
 /** This process's environment without the passphrase: a spawned daemon must never inherit it. */
 function spawnEnv(): NodeJS.ProcessEnv {
@@ -45,6 +52,10 @@ export async function daemonClient(
 ): Promise<IpcClient> {
   const running = await connect(ipcEndpoint(paths)).catch(() => null);
   if (running) return running;
+  // While `recover` replaces the root key, no other daemon may come up under another passphrase.
+  if (!opts.recovering && recoveryInProgress(paths.runtimeDir)) {
+    throw new CliError(RECOVERY_IN_PROGRESS);
+  }
   let stdinPayload: Buffer | undefined;
   if (readConfig(paths) === "keyfile") {
     let passphrase = opts.passphrase ?? process.env[PASSPHRASE_ENV];
@@ -55,11 +66,21 @@ export async function daemonClient(
     if (/[\r\n]/.test(passphrase)) throw new CliError("the passphrase must be a single line");
     stdinPayload = Buffer.from(passphrase, "utf8");
   }
-  return ensureDaemon(paths, {
-    env: spawnEnv(),
-    ...(stdinPayload !== undefined && { stdinPayload }),
-    ...(opts.spawnArgv !== undefined && { spawnArgv: opts.spawnArgv }),
-  });
+  try {
+    return await ensureDaemon(paths, {
+      env: spawnEnv(),
+      ...(stdinPayload !== undefined && { stdinPayload }),
+      ...(opts.spawnArgv !== undefined && { spawnArgv: opts.spawnArgv }),
+      ...(opts.recovering && { extraArgs: ["--recovering"] }),
+      ...(opts.onSpawn !== undefined && { onSpawn: opts.onSpawn }),
+    });
+  } catch (err) {
+    // The daemon we spawned may have been refused by a recover that began a moment ago.
+    if (!opts.recovering && recoveryInProgress(paths.runtimeDir)) {
+      throw new CliError(RECOVERY_IN_PROGRESS);
+    }
+    throw err;
+  }
 }
 
 /** Run `fn` with a daemon connection and close it afterwards. */

@@ -96,3 +96,11 @@ export class VaultLockedError extends Error {
     this.name = "VaultLockedError";
   }
 }
+
+/** `agent-vault recover` holds the recovery lock: no daemon may start until it is done. */
+export class RecoveryInProgressError extends Error {
+  constructor() {
+    super("vault recovery in progress");
+    this.name = "RecoveryInProgressError";
+  }
+}

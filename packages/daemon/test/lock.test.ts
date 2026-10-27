@@ -5,8 +5,15 @@ import path from "node:path";
 import { MemoryKeyStore } from "@agent-vault/platform";
 import { describe, expect, test } from "vitest";
 import { connect } from "../src/client.js";
-import { DaemonAlreadyRunningError } from "../src/errors.js";
-import { acquireLock, readBootId, sameBoot } from "../src/lock.js";
+import { DaemonAlreadyRunningError, RecoveryInProgressError } from "../src/errors.js";
+import {
+  acquireLock,
+  acquireRecoverLock,
+  readBootId,
+  recoverLockPath,
+  recoveryInProgress,
+  sameBoot,
+} from "../src/lock.js";
 import { startDaemon } from "../src/server.js";
 import { useTmp } from "./helpers.js";
 
@@ -182,5 +189,45 @@ describe("single-instance lock", () => {
     fs.writeFileSync(tmp.paths.dbFile, "not a database");
     await expect(start()).rejects.toThrow();
     expect(fs.existsSync(lockFile())).toBe(false);
+  });
+});
+
+describe("recover.lock", () => {
+  const tmp = useTmp();
+
+  test("one holder at a time; releasing frees it", () => {
+    const dir = tmp.paths.runtimeDir;
+    expect(recoveryInProgress(dir)).toBe(false);
+    const release = acquireRecoverLock(dir);
+    expect(recoveryInProgress(dir)).toBe(true);
+    expect(() => acquireRecoverLock(dir)).toThrow(RecoveryInProgressError);
+    release();
+    expect(recoveryInProgress(dir)).toBe(false);
+    acquireRecoverLock(dir)();
+  });
+
+  test("a lock whose owner is dead is reaped", () => {
+    const dir = tmp.paths.runtimeDir;
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const stale: LockContent = {
+      pid: deadPid(),
+      bootId: readBootId(),
+      uptimeMs: os.uptime() * 1000,
+      startedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(recoverLockPath(dir), JSON.stringify(stale));
+    expect(recoveryInProgress(dir)).toBe(false);
+    expect(fs.existsSync(recoverLockPath(dir))).toBe(false);
+
+    fs.writeFileSync(recoverLockPath(dir), JSON.stringify(stale));
+    acquireRecoverLock(dir)();
+  });
+
+  test("is independent of vaultd.lock", () => {
+    const dir = tmp.paths.runtimeDir;
+    const daemonLock = acquireLock(dir);
+    const recoverLock = acquireRecoverLock(dir);
+    recoverLock();
+    daemonLock();
   });
 });
