@@ -30,6 +30,8 @@ export type DoctorCheck = {
   name: string;
   ok: boolean;
   detail: string;
+  /** A line to read, not a test: `ok` is true and `doctor` prints it without counting it. */
+  info?: boolean | undefined;
   /** What to run when `ok` is false. */
   fix?: string | undefined;
   /** The check passes, but something may stop it from passing later. */

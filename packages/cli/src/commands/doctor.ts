@@ -11,18 +11,18 @@ export function doctorCommand(program: Command): void {
     .description("check that a harness is wired up: hooks, daemon, vault, MCP, and a live probe")
     .action(async (harness: string) => {
       const report = await adapterFor(harness).doctor(os.homedir());
-      const width = Math.max(...report.checks.map((c) => c.name.length));
-      for (const c of report.checks) {
+      const tests = report.checks.filter((c) => !c.info);
+      const width = Math.max(...tests.map((c) => c.name.length));
+      for (const c of tests) {
         say(`${c.ok ? "ok  " : "FAIL"}  ${c.name.padEnd(width)}  ${c.detail}`);
         if (!c.ok && c.fix) say(`      fix: ${c.fix}`);
         if (c.warning) say(`      WARNING: ${c.warning}`);
       }
-      const bad = report.checks.filter((c) => !c.ok).length;
+      const bad = tests.filter((c) => !c.ok).length;
       say(
-        bad === 0
-          ? `all ${report.checks.length} checks passed`
-          : `${bad} of ${report.checks.length} checks failed`,
+        bad === 0 ? `all ${tests.length} checks passed` : `${bad} of ${tests.length} checks failed`,
       );
+      for (const c of report.checks.filter((c) => c.info)) say(`info  ${c.name}: ${c.detail}`);
       if (!report.ok) await exitWith(1);
     });
 }
