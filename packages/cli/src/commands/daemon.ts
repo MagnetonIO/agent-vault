@@ -98,14 +98,17 @@ async function viaService<T>(fn: () => Promise<T>): Promise<T> {
 
 async function installDaemon(): Promise<void> {
   const keystore = readConfig(getPaths());
-  const { unitFile } = await viaService(() => installService({ keystore }));
+  const { unitFile, warnings, notes } = await viaService(() => installService({ keystore }));
   say(unitFile ? `installed ${unitFile}` : "registered the logon task agent-vault-daemon");
+  for (const note of notes) say(note);
+  for (const w of warnings) warn(w);
 }
 
 async function uninstallDaemon(): Promise<void> {
-  const { unitFile, warnings } = await viaService(() => uninstallService({}));
+  const { unitFile, warnings, installed } = await viaService(() => uninstallService({}));
   for (const w of warnings) warn(`warning: ${w}`);
-  say(unitFile ? `removed ${unitFile}` : "removed the logon task agent-vault-daemon");
+  if (!installed) say("not installed");
+  else say(unitFile ? `removed ${unitFile}` : "removed the logon task agent-vault-daemon");
 }
 
 export function daemonCommand(program: Command): void {

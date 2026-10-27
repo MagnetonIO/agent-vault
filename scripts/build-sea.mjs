@@ -31,6 +31,36 @@ const readPkg = (dir) => JSON.parse(readFileSync(path.join(root, dir, "package.j
 const cliVersion = readPkg("packages/cli").version;
 const daemonVersion = readPkg("packages/daemon").version;
 
+// The binary embeds whichever node runs this script. Releases pin an exact version (release.yml);
+// a different one still builds, but it is not what ships.
+const pinned = /^\s*NODE_VERSION:\s*(\S+)/m.exec(
+  readFileSync(path.join(root, ".github/workflows/release.yml"), "utf8"),
+)?.[1];
+if (pinned && process.version !== `v${pinned}`) {
+  console.warn(`warning: building with node ${process.version}, but releases pin v${pinned}`);
+}
+
+// A node that links libraries from a package manager (Homebrew) is not self-contained: the copy
+// would need them on every user's machine. Best effort: any failure to look is ignored.
+try {
+  const linked =
+    process.platform === "darwin"
+      ? execFileSync("otool", ["-L", process.execPath], { encoding: "utf8" })
+      : process.platform === "linux"
+        ? execFileSync("ldd", [process.execPath], { encoding: "utf8" })
+        : "";
+  const external = linked
+    .split("\n")
+    .filter((l) => /\/(opt\/homebrew|usr\/local\/(opt|Cellar)|home\/linuxbrew)\/|libnode/.test(l));
+  if (external.length > 0) {
+    console.warn(
+      `warning: ${process.execPath} is dynamically linked to libraries outside the system:\n${external.join("\n")}`,
+    );
+  }
+} catch {
+  // otool or ldd missing, or a static binary: nothing to report.
+}
+
 if (!existsSync(entry)) throw new Error(`${entry} is missing: run pnpm build first`);
 rmSync(outDir, { recursive: true, force: true });
 rmSync(work, { recursive: true, force: true });

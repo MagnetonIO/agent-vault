@@ -19,6 +19,7 @@ jobs:
   sea:
     name: sea (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +48,8 @@ jobs:
       - name: Build smoke test
         env:
           AGENT_VAULT_TEST_SEA: "1"
+          # `pnpm dist` above built it; the test only runs it.
+          AGENT_VAULT_SEA_PREBUILT: "1"
         run: pnpm vitest run test/e2e/sea.test.ts
 
       # A temp vault with the keyfile store, so no keychain or Secret Service is needed. `status`

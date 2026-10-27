@@ -7,11 +7,13 @@ export const unitPath = (home: string): string =>
 
 /**
  * One word for ExecStart= or Environment=. systemd splits on whitespace, honours double quotes,
- * and expands `%` specifiers and `$` variables in both places, so those are doubled. A word with
+ * and expands `%` specifiers in both places, so `%` is doubled. ExecStart= also expands `$`
+ * variables, so it doubles `$` too; Environment= does not (`expandVars` false). A word with
  * anything beyond plain path characters is quoted.
  */
-const word = (s: string): string => {
-  const plain = s.replaceAll("%", "%%").replaceAll("$", "$$$$");
+const word = (s: string, expandVars: boolean): string => {
+  let plain = s.replaceAll("%", "%%");
+  if (expandVars) plain = plain.replaceAll("$", "$$$$");
   if (/^[\w@+=:,./%$-]+$/.test(plain)) return plain;
   return `"${plain.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 };
@@ -23,13 +25,13 @@ export type UnitOptions = {
 };
 
 export function renderUnit({ argv, vaultHome }: UnitOptions): string {
-  const env = vaultHome ? `Environment=${word(`AGENT_VAULT_HOME=${vaultHome}`)}\n` : "";
+  const env = vaultHome ? `Environment=${word(`AGENT_VAULT_HOME=${vaultHome}`, false)}\n` : "";
   return `[Unit]
 Description=agent-vault daemon (vaultd)
 
 [Service]
 Type=simple
-ExecStart=${argv.map(word).join(" ")}
+ExecStart=${argv.map((a) => word(a, true)).join(" ")}
 Restart=on-failure
 ${env}
 [Install]
@@ -38,11 +40,16 @@ WantedBy=default.target
 }
 
 export const activateArgvs = (): string[][] => [
-  ["systemctl", "--user", "daemon-reload"],
+  reloadArgv(),
   ["systemctl", "--user", "enable", "--now", UNIT_NAME],
 ];
 
-export const deactivateArgvs = (): string[][] => [
-  ["systemctl", "--user", "disable", "--now", UNIT_NAME],
-  ["systemctl", "--user", "daemon-reload"],
+export const deactivateArgv = (): string[] => [
+  "systemctl",
+  "--user",
+  "disable",
+  "--now",
+  UNIT_NAME,
 ];
+
+export const reloadArgv = (): string[] => ["systemctl", "--user", "daemon-reload"];

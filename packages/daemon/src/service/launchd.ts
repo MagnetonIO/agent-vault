@@ -59,9 +59,9 @@ export const activateArgv = (uid: number, plist: string): string[] => [
   plist,
 ];
 
-export const deactivateArgv = (uid: number, plist: string): string[] => [
+/** By label, so it still works when the plist was deleted by hand. */
+export const deactivateArgv = (uid: number): string[] => [
   LAUNCHCTL,
   "bootout",
-  `gui/${uid}`,
-  plist,
+  `gui/${uid}/${LABEL}`,
 ];

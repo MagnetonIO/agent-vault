@@ -36,6 +36,8 @@ export type ServiceOptions = {
   uid?: number;
   env?: NodeJS.ProcessEnv;
   paths?: VaultPaths;
+  /** Who the Windows logon task runs for, as `DOMAIN\user`. Default: the current user. */
+  user?: string;
   /** The command the service runs. Default: this CLI's `daemon run`, resolved now. */
   argv?: readonly string[];
   run?: CommandRunner;
@@ -48,6 +50,10 @@ export type ServiceResult = {
   unitFile: string | undefined;
   /** Things that went wrong but did not stop the command. */
   warnings: string[];
+  /** Things to tell the user after a success. */
+  notes: string[];
+  /** Uninstall only: false when there was nothing to remove. */
+  installed: boolean;
 };
 
 type Resolved = {
@@ -88,9 +94,33 @@ async function mustRun(run: CommandRunner, argv: readonly string[]): Promise<voi
   if (code !== 0) throw new ServiceError(`${show(argv)} failed (exit ${code}): ${stderr.trim()}`);
 }
 
+const taskUser = (o: ServiceOptions, env: NodeJS.ProcessEnv): string => {
+  if (o.user) return o.user;
+  const name = os.userInfo().username;
+  return env.USERDOMAIN ? `${env.USERDOMAIN}\\${name}` : name;
+};
+
+async function installTask(o: ServiceOptions, r: Resolved, argv: readonly string[]) {
+  const exe = schtasks.schtasksExe(r.env);
+  // schtasks reads the definition from a file; keep it in the private data dir, and only briefly.
+  ensurePrivateDir(r.paths.dataDir);
+  const xmlFile = path.join(r.paths.dataDir, `task-${process.pid}.xml`);
+  fs.writeFileSync(
+    xmlFile,
+    schtasks.encodeTaskXml(schtasks.renderTaskXml({ argv, user: taskUser(o, r.env) })),
+    { mode: 0o600 },
+  );
+  try {
+    await mustRun(r.run, schtasks.createArgv(exe, xmlFile));
+  } finally {
+    fs.rmSync(xmlFile, { force: true });
+  }
+}
+
 export async function installService(o: InstallOptions): Promise<ServiceResult> {
   const r = resolve(o);
-  if (o.keystore === "keyfile" && !r.env[KEYFILE_PASSPHRASE_ENV]) {
+  const passphraseSet = Boolean(r.env[KEYFILE_PASSPHRASE_ENV]);
+  if (o.keystore === "keyfile" && !passphraseSet) {
     throw new ServiceError(
       `the keyfile store needs a passphrase at daemon start; use --keystore os or set ${KEYFILE_PASSPHRASE_ENV} in the service environment yourself`,
     );
@@ -98,6 +128,13 @@ export async function installService(o: InstallOptions): Promise<ServiceResult> 
   const argv = o.argv ?? daemonRunArgv();
   // The service gets AGENT_VAULT_HOME and nothing else, so it finds the same vault.
   const vaultHome = r.env.AGENT_VAULT_HOME ? r.paths.dataDir : undefined;
+  const warnings: string[] = [];
+  const notes = [`The service pins ${argv[0]}; reinstall after upgrading Node.`];
+  if (o.keystore === "keyfile") {
+    warnings.push(
+      `WARNING: the passphrase is not written to the service. Unless ${KEYFILE_PASSPHRASE_ENV} is in the service's own environment, the daemon cannot unlock the keyfile store and will exit at start.`,
+    );
+  }
 
   if (r.platform === "win32") {
     if (vaultHome) {
@@ -105,8 +142,8 @@ export async function installService(o: InstallOptions): Promise<ServiceResult> 
         "a Task Scheduler task cannot carry AGENT_VAULT_HOME; unset it to install the default vault's service",
       );
     }
-    await mustRun(r.run, schtasks.createArgv(schtasks.schtasksExe(r.env), argv));
-    return { unitFile: undefined, warnings: [] };
+    await installTask(o, r, argv);
+    return { unitFile: undefined, warnings, notes, installed: true };
   }
 
   const unitFile = r.platform === "darwin" ? launchd.plistPath(r.home) : systemd.unitPath(r.home);
@@ -124,38 +161,61 @@ export async function installService(o: InstallOptions): Promise<ServiceResult> 
     if (r.platform === "darwin") {
       const uid = uidOf(o);
       // Bootstrapping a loaded service fails; reinstalling must work, so unload first.
-      await r.run(launchd.deactivateArgv(uid, unitFile));
+      await r.run(launchd.deactivateArgv(uid));
       await mustRun(r.run, launchd.activateArgv(uid, unitFile));
     } else {
       for (const cmd of systemd.activateArgvs()) await mustRun(r.run, cmd);
     }
   } catch (err) {
-    fs.rmSync(unitFile, { force: true });
+    if (r.platform === "linux") {
+      // `enable` may have linked the unit before `--now` failed: undo it before the unit goes.
+      await r.run(systemd.deactivateArgv());
+      fs.rmSync(unitFile, { force: true });
+      await r.run(systemd.reloadArgv());
+    } else {
+      fs.rmSync(unitFile, { force: true });
+    }
     throw err;
   }
-  return { unitFile, warnings: [] };
+  return { unitFile, warnings, notes, installed: true };
 }
 
 export async function uninstallService(o: ServiceOptions): Promise<ServiceResult> {
   const r = resolve(o);
   const warnings: string[] = [];
-  // A service that was never loaded is not an error here: keep going and delete what is left.
-  const tryRun = async (argv: readonly string[]) => {
-    const { code, stderr } = await r.run(argv);
-    if (code !== 0) warnings.push(`${show(argv)} failed (exit ${code}): ${stderr.trim()}`);
-  };
+  const notes: string[] = [];
+  const failed = (argv: readonly string[], code: number, stderr: string) =>
+    `${show(argv)} failed (exit ${code}): ${stderr.trim()}`;
 
   if (r.platform === "win32") {
-    await tryRun(schtasks.deleteArgv(schtasks.schtasksExe(r.env)));
-    return { unitFile: undefined, warnings };
+    const exe = schtasks.schtasksExe(r.env);
+    // Its exit code tells "no such task" from a failed delete without reading localized text.
+    if ((await r.run(schtasks.queryArgv(exe))).code !== 0) {
+      return { unitFile: undefined, warnings, notes, installed: false };
+    }
+    const del = schtasks.deleteArgv(exe);
+    const { code, stderr } = await r.run(del);
+    if (code !== 0) warnings.push(failed(del, code, stderr));
+    return { unitFile: undefined, warnings, notes, installed: true };
   }
 
   const unitFile = r.platform === "darwin" ? launchd.plistPath(r.home) : systemd.unitPath(r.home);
-  if (r.platform === "darwin") {
-    await tryRun(launchd.deactivateArgv(uidOf(o), unitFile));
-  } else {
-    for (const cmd of systemd.deactivateArgvs()) await tryRun(cmd);
-  }
+  const existed = fs.existsSync(unitFile);
+  // Stop and unload first. A failure with a unit file present is worth a warning; without one it
+  // only means nothing was loaded.
+  const stop =
+    r.platform === "darwin" ? launchd.deactivateArgv(uidOf(o)) : systemd.deactivateArgv();
+  const res = await r.run(stop);
+  const installed = existed || res.code === 0;
+  if (!installed) return { unitFile, warnings, notes, installed };
+  if (res.code !== 0) warnings.push(failed(stop, res.code, res.stderr));
+
   fs.rmSync(unitFile, { force: true });
-  return { unitFile, warnings };
+  if (r.platform === "linux") {
+    // Reload only after the file is gone, or systemd keeps the unit in memory.
+    const reload = systemd.reloadArgv();
+    const again = await r.run(reload);
+    if (again.code !== 0) warnings.push(failed(reload, again.code, again.stderr));
+  }
+  return { unitFile, warnings, notes, installed };
 }
