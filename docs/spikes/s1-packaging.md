@@ -1,6 +1,6 @@
 # Spike S1: packaging and native addons
 
-Status: **done**. Code: `spikes/s1-packaging/` (throwaway). CI: `.github/workflows/spike-s1.yml`.
+Status: **done**. Code: `spikes/s1-packaging/` (throwaway). CI: removed after the spike (results below).
 
 Green run (all 3 OSes, plain node and SEA binary, real keyring on every runner):
 https://github.com/MagnetonIO/agent-vault/actions/runs/40436061038

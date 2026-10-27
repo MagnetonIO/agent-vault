@@ -1,6 +1,6 @@
 # Spike S2: local IPC access control
 
-Status: **done**. Code: `spikes/s2-ipc/` (throwaway). CI: `.github/workflows/spike-s2.yml`.
+Status: **done**. Code: `spikes/s2-ipc/` (throwaway). CI: removed after the spike (results below).
 
 Run with every number below (macOS, Linux, Windows all green):
 https://github.com/MagnetonIO/agent-vault/actions/runs/40439676232

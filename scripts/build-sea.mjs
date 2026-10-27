@@ -2,7 +2,7 @@
 //   agent-vault[.exe]   node + the esbuild bundle of packages/cli, injected as a SEA blob
 //   addons/keyring.node  the @napi-rs/keyring addon for this platform, loaded with process.dlopen
 // Run `pnpm build` first (`pnpm dist` does). Cross-building is not supported: pnpm installs only
-// the optional keyring package for the host, so each target is built on its own OS (release.yml).
+// the optional keyring package for the host, so each target is built on its own OS (ci.yml, sea job).
 import { execFileSync } from "node:child_process";
 import {
   copyFileSync,
@@ -31,10 +31,10 @@ const readPkg = (dir) => JSON.parse(readFileSync(path.join(root, dir, "package.j
 const cliVersion = readPkg("packages/cli").version;
 const daemonVersion = readPkg("packages/daemon").version;
 
-// The binary embeds whichever node runs this script. Releases pin an exact version (release.yml);
+// The binary embeds whichever node runs this script. Releases pin an exact version (ci.yml, sea job);
 // a different one still builds, but it is not what ships.
 const pinned = /^\s*NODE_VERSION:\s*(\S+)/m.exec(
-  readFileSync(path.join(root, ".github/workflows/release.yml"), "utf8"),
+  readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"),
 )?.[1];
 if (pinned && process.version !== `v${pinned}`) {
   console.warn(`warning: building with node ${process.version}, but releases pin v${pinned}`);
