@@ -291,6 +291,7 @@ section("socket dir resolution (paths.mjs)");
   // the fallback dir name is predictable: a dir pre-created by another user must be refused
   const sharedTmp = "/tmp";
   const evil = path.join(sharedTmp, `av-${process.getuid()}`);
+  fs.rmSync(evil, { recursive: true, force: true }); // earlier cases created our own fallback dir here on Linux
   const mkEvil = await run("sudo", ["-n", "-u", "nobody", "mkdir", "-m", "0777", evil], {
     cwd: "/",
   });
