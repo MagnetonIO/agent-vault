@@ -1,0 +1,6 @@
+# my codex setup
+model = "gpt-x"  # keep this
+
+[mcp_servers.notes]
+command = "npx"
+args = ["-y", "notes-server"]
