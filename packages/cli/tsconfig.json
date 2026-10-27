@@ -7,10 +7,16 @@
   "include": ["src"],
   "references": [
     {
+      "path": "../adapters"
+    },
+    {
       "path": "../core"
     },
     {
       "path": "../daemon"
+    },
+    {
+      "path": "../detect"
     },
     {
       "path": "../mcp"

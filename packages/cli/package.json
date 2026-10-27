@@ -9,8 +9,10 @@
     "agent-vault": "dist/main.js"
   },
   "dependencies": {
+    "@agent-vault/adapters": "workspace:*",
     "@agent-vault/core": "workspace:*",
     "@agent-vault/daemon": "workspace:*",
+    "@agent-vault/detect": "workspace:*",
     "@agent-vault/mcp": "workspace:*",
     "@agent-vault/platform": "workspace:*",
     "clipboardy": "^5.3.2",

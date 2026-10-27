@@ -4,5 +4,13 @@
   "private": true,
   "type": "module",
   "main": "dist/index.js",
-  "types": "dist/index.d.ts"
+  "types": "dist/index.d.ts",
+  "dependencies": {
+    "@agent-vault/core": "workspace:*",
+    "@agent-vault/daemon": "workspace:*",
+    "@agent-vault/detect": "workspace:*",
+    "@agent-vault/platform": "workspace:*",
+    "jsonc-parser": "^3.3.1",
+    "smol-toml": "^1.9.1"
+  }
 }

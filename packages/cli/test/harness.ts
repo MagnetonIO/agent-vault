@@ -31,9 +31,15 @@ export type Sandbox = {
   clipboard: string;
   env: NodeJS.ProcessEnv;
   /** Run the CLI. `stdin` is written and closed; omitted, stdin is closed at once. */
-  cli(args: string[], opts?: { stdin?: string; env?: NodeJS.ProcessEnv }): Promise<Result>;
+  cli(
+    args: string[],
+    opts?: { stdin?: string; env?: NodeJS.ProcessEnv; cwd?: string },
+  ): Promise<Result>;
   /** Like `cli`, but running: signal it, watch its output. */
-  start(args: string[], opts?: { stdin?: string; env?: NodeJS.ProcessEnv }): RunningCli;
+  start(
+    args: string[],
+    opts?: { stdin?: string; env?: NodeJS.ProcessEnv; cwd?: string },
+  ): RunningCli;
   /** The pid of the sandbox's daemon, or null if none answers. Never starts one. */
   daemonPid(): Promise<number | null>;
   /** `daemon stop`, then wait for the process to be gone. Throws if it is not. */
@@ -65,6 +71,7 @@ export function makeSandbox(keystore: "keyfile" | "os" = "keyfile"): Sandbox {
   const start: Sandbox["start"] = (args, opts = {}) => {
     const child = spawn(process.execPath, [CLI, ...args], {
       env: { ...env, ...opts.env },
+      ...(opts.cwd !== undefined && { cwd: opts.cwd }),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
