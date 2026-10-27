@@ -160,6 +160,15 @@ if (other) {
   ev("pipe-other-user", "SKIPPED (no second user)");
 }
 
+section("Q1c: can Node listen on an AF_UNIX path on Windows?");
+{
+  const sockPath = path.join(PUBLIC, "af-unix-test.sock");
+  const u = net.createServer();
+  const r = await tryListen(u, sockPath);
+  ev("win-af-unix-listen", r.ok ? `listen(${sockPath}) ok` : `${r.code}: ${r.message}`);
+  u.close();
+}
+
 // Q2 order A: vaultd listens first, then a squatter tries the same name
 section("Q2 order A: vaultd first, squatter second");
 const dup = net.createServer();
@@ -220,6 +229,8 @@ if (other) {
     r.ok ? "SUCCEEDED (shared!)" : `${r.code}: ${r.message}`,
   );
   if (r.ok) ev("squat-B-other-user-who-answers", await ping(NAME_B2));
+  // vaultd is not running; the CLI (this user) connects to the name and sends a request
+  ev("squat-B-cli-connects-to-impostor", await ping(NAME_B2));
   v.close();
   await sleep(1500);
   console.log(indent(readOr(f)));

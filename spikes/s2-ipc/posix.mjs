@@ -65,19 +65,24 @@ process.umask(startUmask);
 
 // ---- other local user: does the 0700 dir alone keep them out? --------------------------------
 section("another local user (sudo -u nobody)");
-const asNobody = (sock) =>
-  run(
+const NODE_CONNECT = (sock) =>
+  `const s=require('net').connect(${JSON.stringify(sock)});s.on('connect',()=>{console.log('CONNECTED');s.end()});s.on('error',e=>console.log('ERR '+e.code))`;
+/** Connect as `nobody`. macOS runner's node lives in a user-only dir, so fall back to nc -U. */
+async function asNobody(sock) {
+  const viaNode = await run(
     "sudo",
-    [
-      "-n",
-      "-u",
-      "nobody",
-      process.execPath,
-      "-e",
-      `const s=require('net').connect(${JSON.stringify(sock)});s.on('connect',()=>{console.log('CONNECTED');s.end()});s.on('error',e=>console.log('ERR '+e.code))`,
-    ],
+    ["-n", "-u", "nobody", process.execPath, "-e", NODE_CONNECT(sock)],
     { cwd: "/" },
   );
+  if (viaNode.stdout.trim()) return viaNode.stdout.trim();
+  const viaNc = await run("sudo", ["-n", "-u", "nobody", "/usr/bin/nc", "-U", "-w", "1", sock], {
+    cwd: "/",
+  });
+  const err = viaNc.stderr.trim().slice(0, 160);
+  return viaNc.code === 0
+    ? "CONNECTED (via nc -U)"
+    : `FAILED (via nc -U): ${err || `exit ${viaNc.code}`}`;
+}
 {
   const sock = path.join(base, "wide.sock");
   process.umask(0o000);
@@ -89,15 +94,12 @@ const asNobody = (sock) =>
     `socket mode=${octal(fs.statSync(sock).mode)} dir mode=${octal(fs.statSync(base).mode)}`,
   );
   const closed = await asNobody(sock);
-  ev(
-    "nobody-vs-0700-dir",
-    `${closed.stdout.trim() || closed.stderr.trim().slice(0, 200)} (socket itself is 0777)`,
-  );
+  ev("nobody-vs-0700-dir", `${closed} (socket itself is 0777)`);
   fs.chmodSync(base, 0o755);
   const open = await asNobody(sock);
   ev(
     "nobody-vs-0755-dir-control",
-    `${open.stdout.trim() || open.stderr.trim().slice(0, 200)} (control: must be CONNECTED, else test is inconclusive)`,
+    `${open} (control: must be CONNECTED, else test is inconclusive)`,
   );
   fs.chmodSync(base, 0o700);
   s.close();
