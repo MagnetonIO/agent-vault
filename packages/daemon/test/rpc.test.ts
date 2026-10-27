@@ -1,5 +1,6 @@
 import { type AuditEvent, openDb, type SecretMeta } from "@agent-vault/core";
 import { describe, expect, test } from "vitest";
+import { fakes } from "../../detect/test/fixtures/fake-keys.js";
 import { RpcError } from "../src/errors.js";
 import type { Registry } from "../src/methods/index.js";
 import { registry } from "../src/methods/index.js";
@@ -114,7 +115,7 @@ describe.each(MODES)("daemon over %s", (mode) => {
     });
 
     test("a missing name is detected from the value", async () => {
-      const token = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
+      const token = fakes.githubPat();
       const meta = await env.client.call<SecretMeta>("secret.put", { valueB64: b64(token) });
       expect(meta.name).toMatch(/^[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*-\d{8}$/);
       expect(meta.type).not.toBe("generic");

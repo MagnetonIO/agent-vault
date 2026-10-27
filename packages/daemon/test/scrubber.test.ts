@@ -3,13 +3,24 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { ALNUM, B64, body, fakes } from "../../detect/test/fixtures/fake-keys.js";
 import type { RpcError } from "../src/errors.js";
 import { registry } from "../src/methods/index.js";
 import { createScrubMethods } from "../src/methods/scrub.js";
 import { scrubFiles } from "../src/scrubber.js";
 import { b64, useDaemon } from "./helpers.js";
 
-const SECRET = "sk-test-Zq81xLmN0pRtUvWy3456AbCdEfGh";
+// Built at run time: no key-shaped literal in the repo (AGENTS.md).
+const SECRET = `sk-${"test"}-${body(ALNUM, 28, 1301)}`;
+const OTHER = fakes.githubPat();
+/** A PEM private key with a trailing newline, as a key file holds it. */
+const PEM = [
+  `-----BEGIN ${"PRIVATE"} KEY-----`,
+  body(B64, 32, 1302),
+  body(B64, 19, 1303),
+  `-----END ${"PRIVATE"} KEY-----`,
+  "",
+].join("\n");
 const REF = "vault://api/key";
 const R = [{ value: SECRET, ref: REF }];
 
@@ -58,7 +69,7 @@ describe("scrubFiles", () => {
   });
 
   test("a PEM key whose newlines are escaped inside JSON is scrubbed", async () => {
-    const pem = `-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nKgwggSkAgEAAoIBAQC7\n-----END PRIVATE KEY-----\n`;
+    const pem = PEM;
     const file = write("pem.jsonl", jsonl({ text: `here:\n${pem}` }, { text: "after" }));
     expect(fs.readFileSync(file, "utf8")).toContain("\\n");
     const result = await scrubFiles([file], [{ value: pem, ref: "vault://pem/key" }]);
@@ -168,7 +179,7 @@ describe("scrubFiles", () => {
   });
 
   test("two secrets in one pass, each under its own reference", async () => {
-    const other = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const other = OTHER;
     const file = write("two.jsonl", jsonl({ a: SECRET, b: other }));
     const result = await scrubFiles([file], [...R, { value: other, ref: "vault://gh/pat" }]);
     expect(result.replacements).toBe(2);
@@ -350,8 +361,7 @@ describe("JSON-aware scrubbing", () => {
   });
 
   test("a PEM at double depth (a JSON file printed inside a JSON string)", async () => {
-    const pem =
-      "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nKgwggSkAgEAAoIBAQC7\n-----END PRIVATE KEY-----\n";
+    const pem = PEM;
     const inner = JSON.stringify({ private_key: pem, client_email: "a@b.c" });
     const out = await scrubLine(
       JSON.stringify({ tool_result: `cat key.json\n${inner}` }),
@@ -704,7 +714,7 @@ describe("scrub.queue and scrub.run", () => {
   });
 
   test("a file with several secrets gets one audit event per secret", async () => {
-    const other = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const other = OTHER;
     await put("api/key", SECRET);
     await put("gh/pat", other);
     const file = homeFile("two.jsonl", jsonl({ a: SECRET, b: other }));

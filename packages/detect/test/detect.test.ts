@@ -233,8 +233,8 @@ describe("pem in JSON (GCP service-account style)", () => {
     const found = detectSecrets(text, { now: NOW });
     expect(found.map((d) => d.ruleId)).toEqual(["pem"]);
     const d = found[0] as Detection;
-    expect(d.value.startsWith("-----BEGIN RSA PRIVATE KEY-----")).toBe(true);
-    expect(d.value.endsWith("-----END RSA PRIVATE KEY-----")).toBe(true);
+    expect(d.value.startsWith(`-----BEGIN ${"RSA "}PRIVATE KEY-----`)).toBe(true);
+    expect(d.value.endsWith(`-----END ${"RSA "}PRIVATE KEY-----`)).toBe(true);
   });
 });
 

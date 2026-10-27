@@ -10,11 +10,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { fakes } from "../../detect/test/fixtures/fake-keys.js";
 import { createMcpServer, harnessFor, type McpServerOptions } from "../src/server.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 
-const SECRET = "ghp_aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fH3jK5";
+const SECRET = fakes.githubPat();
 const NODE = process.execPath;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.resolve(here, "../../cli/dist/main.js");

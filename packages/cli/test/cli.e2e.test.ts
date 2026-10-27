@@ -3,14 +3,18 @@ import path from "node:path";
 import { connect } from "@agent-vault/daemon";
 import { getPaths, ipcEndpoint } from "@agent-vault/platform";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { ALNUM, body, fakes } from "../../detect/test/fixtures/fake-keys.js";
 import { alive, environOf, makeSandbox, PASSPHRASE, type Sandbox } from "./harness.js";
 
 // Each call starts node, and the first one in a sandbox also starts the daemon (Argon2id on the
 // keyfile, icacls on Windows).
 const TIMEOUT_MS = 60_000;
 
-const PAT = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-const API_KEY = "e2e-api-key-value-0123456789abcdef";
+// Built at run time: no key-shaped literal in the repo (AGENTS.md).
+const PAT = fakes.githubPat();
+const PAT2 = `gh${"p"}_${body(ALNUM, 36, 1201)}`;
+const API_KEY = `e2e-${body(ALNUM, 30, 1202)}`;
+const HELPER_VALUE = `sk-${"helper"}-${body(ALNUM, 16, 1203)}`;
 const REDACTED = (name: string) => `[redacted vault://${name}]`;
 
 /** Every sandbox made here, so the orphan check at the end covers all of them. */
@@ -105,7 +109,7 @@ describe("agent-vault CLI", { timeout: TIMEOUT_MS }, () => {
   });
 
   test("grab without a name detects the type and picks a name", async () => {
-    fs.writeFileSync(sb.clipboard, PAT.replace("abcdefghij", "bcdefghijk"));
+    fs.writeFileSync(sb.clipboard, PAT2);
     const grab = await sb.cli(["grab"]);
     expect(grab.code, grab.stderr).toBe(0);
     expect(grab.stdout).toMatch(/^stored \S+ · github · 40 chars$/m);
@@ -203,11 +207,11 @@ describe("agent-vault CLI", { timeout: TIMEOUT_MS }, () => {
   });
 
   test("helper prints a helper-tagged secret and refuses the rest", async () => {
-    fs.writeFileSync(sb.clipboard, "sk-helper-secret-value-4455");
+    fs.writeFileSync(sb.clipboard, HELPER_VALUE);
     expect((await sb.cli(["grab", "anthropic", "--tag", "helper"])).code).toBe(0);
     const ok = await sb.cli(["helper", "anthropic"]);
     expect(ok.code, ok.stderr).toBe(0);
-    expect(ok.stdout).toBe("sk-helper-secret-value-4455\n");
+    expect(ok.stdout).toBe(`${HELPER_VALUE}\n`);
 
     const refused = await sb.cli(["helper", "svc/key"]);
     expect(refused.code).toBe(1);

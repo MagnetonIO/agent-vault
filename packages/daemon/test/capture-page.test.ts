@@ -2,10 +2,11 @@ import http from "node:http";
 import net from "node:net";
 import type { AuditEvent, SecretMeta } from "@agent-vault/core";
 import { describe, expect, test } from "vitest";
+import { B64, body, fakes } from "../../detect/test/fixtures/fake-keys.js";
 import { escapeHtml, openCommand, openUrl } from "../src/capture-page.js";
 import { b64, MODES, useDaemon } from "./helpers.js";
 
-const SECRET = "ghp_aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fH3jK5";
+const SECRET = fakes.githubPat();
 const TTL = 10 * 60_000;
 const SELF_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'";
 
@@ -345,13 +346,16 @@ describe.each(MODES)("capture page over %s", (mode) => {
 
   test("a PEM that lost its newlines is 400 with the hint and keeps the nonce", async () => {
     const { url } = await begin();
-    const flat = "-----BEGIN PRIVATE KEY-----MIIEvQIBADANBgkq-----END PRIVATE KEY-----";
+    const header = `-----BEGIN ${"PRIVATE"} KEY-----`;
+    const footer = `-----END ${"PRIVATE"} KEY-----`;
+    const keyBody = body(B64, 16, 1501);
+    const flat = `${header}${keyBody}${footer}`;
     const res = await post(url, { name: "pem/key", value: flat });
     expect(res.status).toBe(400);
     expect(res.body).toContain("agent-vault set &lt;name&gt; in a terminal");
-    expect(res.body).not.toContain("MIIEvQ");
+    expect(res.body).not.toContain(keyBody);
     expect(await env.client.call<SecretMeta[]>("secret.list")).toEqual([]);
-    const intact = flat.replace("-----MIIE", "-----\nMIIE").replace("q-----END", "q\n-----END");
+    const intact = `${header}\n${keyBody}\n${footer}`;
     expect((await post(url, { name: "pem/key", value: intact })).status).toBe(200);
   });
 

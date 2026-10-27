@@ -186,7 +186,7 @@ describe("redactor", () => {
     };
 
     test("1e5 back-to-back copies are linear in time and bounded in memory", () => {
-      const value = "k3y-0123456789-abcdefghijklmnopqrstuvwxy"; // 40 chars
+      const value = `k3y-${body(ALNUM, 36, 1401)}`; // 40 chars
       expect(value).toHaveLength(40);
       const longest = Buffer.from(value).toString("base64").length;
       const { out, maxHeld, ms } = pushAll(value, value.repeat(100_000));
