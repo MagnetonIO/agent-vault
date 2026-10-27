@@ -79,10 +79,9 @@ jobs:
           fi
           grep "keyring: FAIL" pin-nobus.log
 
-      - name: Pin control, no bus, no pin (Linux, observe)
+      - name: Pin control, no bus, no pin (Linux, must succeed)
         if: runner.os == 'Linux'
         run: |
           export DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent
-          SPIKE_NO_PIN=1 ./dist/s1-spike | tee nopin-nobus.log || echo "CONTROL RESULT: failed"
-          tail -n 1 nopin-nobus.log | grep -qx OK && echo "CONTROL RESULT: succeeded"
-          cat /proc/keys | head -5 || true
+          SPIKE_NO_PIN=1 ./dist/s1-spike | tee nopin-nobus.log
+          tail -n 1 nopin-nobus.log | grep -qx OK

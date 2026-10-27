@@ -25,7 +25,9 @@ https://github.com/MagnetonIO/agent-vault/actions/runs/40436061038
 | `@napi-rs/keyring` set/get/delete, SEA | ok | ok | ok |
 | `ExperimentalWarning` printed | no | no | no |
 | Binary prints `OK` | yes | yes | yes |
-| Linux pin check: no Secret Service reachable | n/a | keyring step **fails** (no silent kernel-keyring fallback) | n/a |
+| Linux pin, locked keyring (bus exists, keyring not unlocked) | n/a | pinned Entry **throws**: `Couldn't access platform storage: Secret Service: unlock prompt was dismissed` | n/a |
+| Linux pin, no bus (`DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`) | n/a | pinned Entry **throws**: `Platform failure: DBus error: Failed to connect to socket /nonexistent: No such file or directory` | n/a |
+| Linux control, no bus, **unpinned** (`SPIKE_NO_PIN=1`) | n/a | **succeeds** (set/get/delete ok, prints `OK`): silent fallback observed. Only the kernel keyutils store is reachable without a bus, so that is the store it used | n/a |
 
 Local Mac (Node 24.22.0, arm64) ran the SEA binary with `SPIKE_SKIP_KEYRING=1`: both SQLite drivers ok, keyring `.node` loads (`Entry` exported), no `Entry` constructed, so the real Keychain was never touched. Removing `dist/addons/` makes the binary fail with a `dlopen` error, which proves the addons really load from beside it.
 
@@ -45,7 +47,11 @@ dbus-run-session -- sh -c '
 - The password **must be non-empty.** With `echo -n ""` the daemon starts but no usable default collection exists, and every call fails with `Secret Service: no result found`. Tried and failed: `--unlock` alone, `--unlock --components=secrets`, `--daemonize --login --components=secrets`, and a `secret-tool store` primer, all with an empty password. A non-empty password worked first time.
 - Everything that touches the keyring must run **inside** the same `dbus-run-session` shell.
 - macOS and Windows need no setup: the runner's login Keychain and Credential Manager work as is.
-- Code side: `new Entry(service, account, { linux: { store: 'secret-service' } })`. With no Secret Service reachable this throws instead of falling back to kernel keyutils (verified by the negative CI step; the error on the runner was `Secret Service: unlock prompt was dismissed`).
+- Code side: `new Entry(service, account, { linux: { store: 'secret-service' } })`. Without the pin, an unreachable Secret Service silently falls back to the kernel keyutils keyring (control observed on the runner). With the pin it throws instead. Two distinct errors, handle both (Task 7):
+  - Locked keyring (a bus exists, keyring not unlocked): `Couldn't access platform storage: Secret Service: unlock prompt was dismissed`. Seen on the plain runner, where libdbus autolaunches a bus because `dbus-x11` is installed.
+  - No bus: `Platform failure: DBus error: Failed to connect to socket /nonexistent: No such file or directory`. Unsetting `DBUS_SESSION_BUS_ADDRESS` is **not** enough to get here (autolaunch), so the CI step points it at a nonexistent socket.
+  - Empty-password keyring (see above): `Secret Service: no result found`.
+  - The fallback is observed, not just per upstream docs. The control only proves the unpinned call succeeds with no Secret Service; that it landed in keyutils is inferred (no other store was reachable), not read back from `/proc/keys`.
 
 Windows step needs `shell: bash` (set as a default in the workflow) so the same `./dist/s1-spike | tee` line works; Git Bash resolves `s1-spike` to `s1-spike.exe`.
 
