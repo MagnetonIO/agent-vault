@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { type Detection, detectSecrets, fingerprint } from "../src/index.js";
-import { benign, fakes } from "./fixtures/fake-keys.js";
+import { createRedactor, type Detection, detectSecrets, fingerprint } from "../src/index.js";
+import { B64, benign, body, fakes } from "./fixtures/fake-keys.js";
 
 const NOW = new Date(Date.UTC(2026, 9, 27, 23, 59, 0));
 
@@ -199,6 +199,98 @@ describe("no false positives", () => {
     expect(detectSecrets("please run npm install and then pnpm test")).toEqual([]);
     expect(detectSecrets("a".repeat(64))).toEqual([]);
     expect(detectSecrets("")).toEqual([]);
+  });
+});
+
+describe("pem in JSON (GCP service-account style)", () => {
+  const pemLines = () => fakes.pem().split("\n");
+
+  test.each([
+    ["\\n", "\\n escapes"],
+    ["\\r\\n", "\\r\\n escapes"],
+  ])(
+    "literal %s is a line separator: one detection BEGIN..END, 0 body chars after redaction",
+    (sep) => {
+      const pem = pemLines().join(sep);
+      const text = `{"type":"service_account","private_key":"${pem}${sep}","client_email":"x@example.test"}`;
+      const found = detectSecrets(text, { now: NOW });
+      expect(found).toHaveLength(1);
+      const d = found[0] as Detection;
+      expect(d.ruleId).toBe("pem");
+      expect(d.value).toBe(pem);
+      expect(text.slice(d.start, d.end)).toBe(pem);
+
+      const r = createRedactor(found.map((x) => ({ name: x.suggestedName, value: x.value })));
+      const out = r.push(text) + r.flush();
+      for (const line of pemLines().slice(1, -1)) expect(out).not.toContain(line.slice(0, 12));
+      expect(out).toMatch(/^\{"type":"service_account","private_key":"\[redacted vault:\/\/pem\//);
+      expect(out).toContain('","client_email":"x@example.test"}');
+    },
+  );
+
+  test("JSON.stringify output of a PEM value is fully covered by one detection", () => {
+    const text = JSON.stringify({ private_key: `${fakes.pem()}\n`, id: "1" });
+    const found = detectSecrets(text, { now: NOW });
+    expect(found.map((d) => d.ruleId)).toEqual(["pem"]);
+    const d = found[0] as Detection;
+    expect(d.value.startsWith("-----BEGIN RSA PRIVATE KEY-----")).toBe(true);
+    expect(d.value.endsWith("-----END RSA PRIVATE KEY-----")).toBe(true);
+  });
+});
+
+describe("generic-high-entropy false positives", () => {
+  test.each([
+    ["camelCase identifier", benign.camel],
+    ["source path", benign.srcPath],
+    ["branch name", benign.branch],
+    ["lockfile integrity hash", benign.lockfileIntegrity],
+    ["data URI payload", benign.dataUri],
+  ])("%s yields 0 detections", (_n, text) => {
+    expect(detectSecrets(text)).toEqual([]);
+    expect(detectSecrets(`ref: ${text} (see above)`)).toEqual([]);
+  });
+
+  test("integrity hash after an assignment name is still ignored", () => {
+    expect(detectSecrets(`integrity=${benign.lockfileIntegrity}`)).toEqual([]);
+  });
+
+  test("a random 40-char string over [A-Za-z0-9+/=_-] is detected whole", () => {
+    const v = fakes.genericMixed();
+    const d = one(`secret: ${v}`);
+    expect(d.ruleId).toBe("generic-high-entropy");
+    expect(d.value).toBe(v);
+  });
+
+  test("random 40-char strings are detected (>= 99% of 300 seeds)", () => {
+    let hits = 0;
+    for (let seed = 1000; seed < 1300; seed++) {
+      const v = body(`${B64}=_-`, 40, seed);
+      if (detectSecrets(` ${v} `).some((d) => d.value === v)) hits++;
+    }
+    expect(hits).toBeGreaterThanOrEqual(297);
+  });
+
+  test("an interior = in a random string does not split it", () => {
+    const v = `${body(B64, 18, 5)}=${body(B64, 21, 6)}`;
+    expect(one(`x ${v} y`).value).toBe(v);
+  });
+});
+
+describe("performance", () => {
+  test("1 MB of 64-column random base64 lines scans in under 1000 ms", () => {
+    const flat = body(B64, 1024 * 1024, 99);
+    const lines: string[] = [];
+    for (let i = 0; i < flat.length; i += 64) lines.push(flat.slice(i, i + 64));
+    const text = lines.join("\n");
+
+    const t0 = performance.now();
+    const found = detectSecrets(text, { now: NOW });
+    const ms = performance.now() - t0;
+
+    expect(found.length).toBeGreaterThan(10_000);
+    expect(ms).toBeLessThan(1000);
+    // names stay unique without rescanning
+    expect(new Set(found.map((d) => d.suggestedName)).size).toBe(found.length);
   });
 });
 

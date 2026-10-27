@@ -132,8 +132,97 @@ describe("redactor", () => {
     expect(r.flush()).toBe("");
   });
 
-  test("empty secret value is ignored", () => {
-    expect(run([{ name: "e", value: "" }], ["abc"])).toBe("abc");
+  describe("short secrets", () => {
+    test.each(["", "a", "ab", "abc"])("%j (under 4 chars) throws RangeError", (value) => {
+      expect(() => createRedactor([{ name: "tiny", value }])).toThrow(RangeError);
+    });
+
+    test("the error names the secret but never shows its value", () => {
+      let message = "";
+      try {
+        createRedactor([{ name: "my-pin", value: "s3c" }]);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toContain("my-pin");
+      expect(message).not.toContain("s3c");
+    });
+
+    test('4 chars is allowed: "nana" in "banana" gives ba[redacted vault://x]', () => {
+      expect(run([{ name: "x", value: "nana" }], ["banana"])).toBe("ba[redacted vault://x]");
+    });
+
+    test("4-7 char secrets are redacted in raw form only", () => {
+      const value = "pa/s+w";
+      const b64 = Buffer.from(value).toString("base64");
+      expect(run([{ name: "p", value }], [`${value} ${b64}`])).toBe(`[redacted vault://p] ${b64}`);
+    });
+
+    test("8 chars gets the encoded variants", () => {
+      const value = "pa/s+w=?";
+      const b64 = Buffer.from(value).toString("base64");
+      expect(run([{ name: "p", value }], [`<${b64}>`])).toBe("<[redacted vault://p]>");
+    });
+  });
+
+  describe("overlapping and adjacent secrets", () => {
+    const A = "abcd1234";
+    const B = "d1234efgh5678";
+    const both = [
+      { name: "a", value: A },
+      { name: "b", value: B },
+    ];
+    const text = "abcd1234efgh5678";
+
+    const noLeak = (out: string) => {
+      expect(out).not.toContain("efgh5678");
+      for (let i = 0; i + 4 <= B.length; i++) expect(out).not.toContain(B.slice(i, i + 4));
+    };
+
+    test("overlap merges into ONE redaction named after the leftmost match", () => {
+      const out = run(both, [text]);
+      expect(out).toBe("[redacted vault://a]");
+      noLeak(out);
+    });
+
+    test("same result for every split and one char per push", () => {
+      for (let i = 1; i < text.length; i++) {
+        expect(run(both, [text.slice(0, i), text.slice(i)]), `split ${i}`).toBe(
+          "[redacted vault://a]",
+        );
+      }
+      const out = run(both, [...`<${text}>`]);
+      expect(out).toBe("<[redacted vault://a]>");
+      noLeak(out);
+    });
+
+    test("the later match starting inside the hold-back window is not cut off", () => {
+      // A completes (and is eligible to flush) before B is fully buffered.
+      const out = run(both, ["xx abcd1234", "efgh5678 yy"]);
+      expect(out).toBe("xx [redacted vault://a] yy");
+    });
+
+    test("adjacent matches merge too", () => {
+      const out = run(
+        [
+          { name: "a", value: "aaaa1111" },
+          { name: "b", value: "bbbb2222" },
+        ],
+        ["aaaa1111bb", "bb2222"],
+      );
+      expect(out).toBe("[redacted vault://a]");
+    });
+
+    test("a rightmost-named match is not used when it starts later", () => {
+      const out = run(
+        [
+          { name: "b", value: "d1234efgh5678" },
+          { name: "a", value: "abcd1234" },
+        ],
+        [text],
+      );
+      expect(out).toBe("[redacted vault://a]");
+    });
   });
 
   test("does not split a surrogate pair at the holdback boundary", () => {

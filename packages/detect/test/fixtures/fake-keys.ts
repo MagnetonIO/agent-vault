@@ -1,10 +1,10 @@
 // Generated fakes only. Bodies come from a seeded PRNG and every key is assembled from
 // parts at runtime so no literal key-shaped string exists in the repo.
 
-const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+export const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const UPPER_DIGITS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const URLSAFE = `${ALNUM}_-`;
-const B64 = `${ALNUM}+/`;
+export const B64 = `${ALNUM}+/`;
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -52,9 +52,15 @@ export const fakes = {
       `-----END ${"RSA "}PRIVATE KEY-----`,
     ].join("\n"),
   generic: () => body(B64, 40, 12),
+  genericMixed: () => body(`${ALNUM}+/=_-`, 40, 77),
 };
 
 export const benign = {
+  camel: "someVeryLongCamelCaseIdentifierNameWithNumbers123AndMoreStuff",
+  srcPath: "src/components/UserProfileSettingsPanel/index2/hooks-useThing",
+  branch: "feature/AGENT-1234-add-detect-package-with-long-branch-name",
+  lockfileIntegrity: `sha${"512"}-${body(B64, 86, 41)}==`,
+  dataUri: `data:image/png;base64,${body(B64, 120, 42)}==`,
   gitSha: "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3",
   sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   uuid: "123e4567-e89b-12d3-a456-426614174000",
